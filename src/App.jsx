@@ -321,7 +321,7 @@ function Dashboard({worker, weekLabel, siteHours, allSites, onLogout}){
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
                 <KPI label="Gross Pay" value={"£"+gross.toFixed(2)} color={C.green}/>
                 <KPI label="Net Pay" value={"£"+net.toFixed(2)} color={C.purple}/>
-                <KPI label="Tax ("+taxPct+"%)" value={"£"+taxAmt.toFixed(2)} color={C.red}/>
+                <KPI label={`Tax (${taxPct}%)`} value={`£${taxAmt.toFixed(2)}`} color={C.red}/>
                 <KPI label="Hours" value={stdH+"h"+(otH>0?" +"+otH:"") } color={C.accent} sub={otH>0?"incl. overtime":"standard"}/>
               </div>
 
