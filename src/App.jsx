@@ -7,6 +7,7 @@ const SB_H   = {"Content-Type":"application/json","apikey":SB_KEY,"Authorization
 async function sbGet(t,f=""){const r=await fetch(`${SB_URL}/rest/v1/${t}?${f}`,{headers:SB_H});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function sbPatch(t,f,d){const r=await fetch(`${SB_URL}/rest/v1/${t}?${f}`,{method:"PATCH",headers:{...SB_H,"Prefer":"return=minimal"},body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());}
 async function sbPost(t,d){const r=await fetch(`${SB_URL}/rest/v1/${t}`,{method:"POST",headers:{...SB_H,"Prefer":"return=minimal"},body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());}
+async function sbUpsert(t,d){const r=await fetch(`${SB_URL}/rest/v1/${t}`,{method:"POST",headers:{...SB_H,"Prefer":"resolution=merge-duplicates"},body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());}
 async function sbSignUp(email,password){const r=await fetch(`${SB_URL}/auth/v1/signup`,{method:"POST",headers:SB_H,body:JSON.stringify({email,password})});const d=await r.json();if(d.error)throw new Error(d.error.message||d.error);return d;}
 async function sbSignIn(email,password){const r=await fetch(`${SB_URL}/auth/v1/token?grant_type=password`,{method:"POST",headers:SB_H,body:JSON.stringify({email,password})});const d=await r.json();if(d.error)throw new Error(d.error.message||d.error);return d;}
 async function uploadCertPhoto(file,workerId,certKey){const ext=file.name.split(".").pop();const path=`${workerId}/${certKey}.${ext}`;const r=await fetch(`${SB_URL}/storage/v1/object/cert-photos/${path}`,{method:"POST",headers:{"apikey":SB_KEY,"Authorization":`Bearer ${SB_KEY}`,"Content-Type":file.type,"x-upsert":"true"},body:file});if(!r.ok)throw new Error(await r.text());return `${SB_URL}/storage/v1/object/public/cert-photos/${path}`;}
@@ -355,7 +356,8 @@ function RegisterScreen({onBack}){
         days:{Mon:"",Tue:"",Wed:"",Thu:"",Fri:"",Sat:"",Sun:""},hoursPerDay:{},overtimeHours:{},agreedRate:0,taxRate:0.20,
         registeredAt:new Date().toISOString(),termsSignedAt:sAt,termsAccepted:true,
         detailsHistory:[],payslips:[]};
-      await sbPost("pending_workers",{status:"pending",data:wd});
+      // Write directly into workers table — no approval step needed
+      await sbUpsert("workers",[{id:wd.id,data:wd}]);
       setDone(true);
     }catch(e){setErr(e.message||"Registration failed.");setStep(2);}
     setSubmitting(false);
@@ -364,11 +366,11 @@ function RegisterScreen({onBack}){
   if(done)return(
     <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"system-ui,sans-serif",textAlign:"center"}}>
       <div style={{fontSize:56,marginBottom:16}}>🎉</div>
-      <div style={{fontSize:22,fontWeight:900,color:C.text,marginBottom:8}}>Registration Complete!</div>
-      <div style={{fontSize:14,color:C.sub,maxWidth:320,lineHeight:1.6,marginBottom:12}}>Your details and signed agreement have been submitted to Bright Metalwork. Once approved by an administrator you can sign in with your email and password.</div>
+      <div style={{fontSize:22,fontWeight:900,color:C.text,marginBottom:8}}>You're all set!</div>
+      <div style={{fontSize:14,color:C.sub,maxWidth:320,lineHeight:1.6,marginBottom:12}}>Your registration is complete. You can now sign in immediately with your email and password.</div>
       <div style={{background:C.card,border:`1px solid ${C.green}44`,borderRadius:12,padding:"12px 20px",marginBottom:8,fontSize:13,color:C.green,fontWeight:600}}>✓ Signed agreement PDF was downloaded</div>
       <div style={{background:C.card,border:`1px solid ${C.green}44`,borderRadius:12,padding:"12px 20px",marginBottom:24,fontSize:13,color:C.green,fontWeight:600}}>✓ Account created for {email}</div>
-      <button onClick={onBack} style={{background:"linear-gradient(135deg,#1e3a5f,#3b82f6)",border:"none",borderRadius:10,padding:"12px 28px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>← Back to Sign In</button>
+      <button onClick={onBack} style={{background:"linear-gradient(135deg,#1e3a5f,#3b82f6)",border:"none",borderRadius:10,padding:"12px 28px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>Sign In Now →</button>
     </div>
   );
 
