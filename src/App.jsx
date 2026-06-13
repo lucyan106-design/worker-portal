@@ -525,38 +525,97 @@ ${worker.bankName||worker.accountNo?`<div style="margin-top:14px;padding:10px 14
 // ─── TIMESHEET VIEW ───────────────────────────────────────────────────────────
 function TimesheetView({worker,weekLabel,siteHours,allSites,payslips}){
   const activeDays=useMemo(()=>{const hw=WEEKEND_DAYS.some(d=>worker.days?.[d]&&!isOff(worker.days[d]));return hw?ALL_DAYS:BASE_DAYS;},[worker]);
-  const {stdH,otH,gross,taxAmt,net,bd}=useMemo(()=>calcPay(worker,activeDays,siteHours),[worker,activeDays,siteHours]);
   const taxPct=Math.round((worker.taxRate||0)*100);
   const currentPs=payslips.find(p=>p.weekLabel===weekLabel);
+
+  // Only use GPS-confirmed attendance for timesheet calculations
+  const confirmedLogs=useMemo(()=>
+    (worker.attendanceLogs||[]).filter(l=>l.weekLabel===weekLabel&&l.signIn&&l.signOut),
+    [worker,weekLabel]
+  );
+
+  // Calculate pay from confirmed logs only
+  const confirmedPay=useMemo(()=>{
+    let gross=0,stdH=0,otH=0;
+    confirmedLogs.forEach(l=>{
+      const site=allSites.find(s=>s.id===l.siteId||s.name===l.siteName);
+      const rate=worker.agreedRate||0;
+      const hrs=l.hoursWorked||hoursFromMs(new Date(l.signOut)-new Date(l.signIn));
+      const ot=l.otHours||0;
+      const std=l.stdHours||hrs;
+      stdH+=std;otH+=ot;
+      gross+=std*rate+ot*rate*(worker.overtimeMultiplier||1.5);
+    });
+    const taxAmt=gross*((worker.taxRate)||0);
+    return{gross,taxAmt,net:gross-taxAmt,stdH,otH};
+  },[confirmedLogs,worker,allSites]);
+
   return <div style={{padding:14}}>
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
-      <div><div style={{fontSize:13,fontWeight:800,color:C.text}}>Current Week</div><div style={{fontSize:11,color:C.muted}}>WC {weekLabel}</div></div>
-      <button onClick={()=>printPayslip(worker,weekLabel,gross,net,taxAmt,taxPct,bd,activeDays)} style={{padding:"7px 13px",background:"#1a2535",border:`1px solid ${C.red}44`,borderRadius:8,color:C.red,cursor:"pointer",fontSize:12,fontWeight:700}}>📄 Print Timesheet</button>
+      <div>
+        <div style={{fontSize:13,fontWeight:800,color:C.text}}>Timesheet — WC {weekLabel}</div>
+        <div style={{fontSize:11,color:C.muted}}>Confirmed entries only · Forecast shown as unconfirmed</div>
+      </div>
+      <button onClick={()=>printPayslip(worker,weekLabel,confirmedPay.gross,confirmedPay.net,confirmedPay.taxAmt,taxPct,{},activeDays)}
+        style={{padding:"7px 13px",background:"#1a2535",border:`1px solid ${C.red}44`,borderRadius:8,color:C.red,cursor:"pointer",fontSize:12,fontWeight:700}}>📄 Print</button>
     </div>
+
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:14}}>
-      <KPI label="Std Hrs" value={stdH+"h"} color={C.accent}/><KPI label="OT Hrs" value={otH>0?otH+"h":"—"} color={C.yellow}/>
-      <KPI label="Gross" value={"£"+gross.toFixed(0)} color={C.green}/><KPI label="Net" value={"£"+net.toFixed(0)} color={C.purple}/>
+      <KPI label="Conf. Hrs" value={confirmedPay.stdH.toFixed(1)+"h"} color={C.green} sub="GPS confirmed"/>
+      <KPI label="OT Hrs" value={confirmedPay.otH>0?confirmedPay.otH.toFixed(1)+"h":"—"} color={C.yellow}/>
+      <KPI label="Gross" value={"£"+confirmedPay.gross.toFixed(0)} color={C.green}/>
+      <KPI label="Net" value={"£"+confirmedPay.net.toFixed(0)} color={C.purple}/>
     </div>
-    <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:16}}>
-      {activeDays.map(d=>{const site=worker.days?.[d],b=bd[d],col=siteColor(site,allSites),off=!site||isOff(site);
-        return <Card key={d} style={{borderLeft:`3px solid ${off?"#1e2535":col}`,padding:"10px 13px"}}>
+
+    {/* Day by day — confirmed + unconfirmed forecast */}
+    <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:16}}>
+      {activeDays.map(d=>{
+        const forecastSite=worker.days?.[d];
+        const off=!forecastSite||isOff(forecastSite);
+        const dayLogs=confirmedLogs.filter(l=>l.day===d);
+        const isConfirmed=dayLogs.length>0;
+        const col=siteColor(forecastSite,allSites);
+        const dayTotal=dayLogs.reduce((a,l)=>a+(l.hoursWorked||hoursFromMs(new Date(l.signOut)-new Date(l.signIn))),0);
+
+        return <Card key={d} style={{
+          borderLeft:`3px solid ${isConfirmed?C.green:off?"#1e2535":C.yellow+"88"}`,
+          padding:"10px 13px",
+          background:isConfirmed?"#0d221822":C.card,
+        }}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{fontSize:12,fontWeight:800,color:off?C.muted:C.text,minWidth:32}}>{d}</div>
-            {off?<span style={{fontSize:12,color:C.muted,fontStyle:"italic",flex:1}}>{site||"Not allocated"}</span>
-              :<><div style={{flex:1}}><Badge label={site.trim()} color={col}/></div><span style={{fontSize:11,color:C.muted}}>{b?.hours}h{b?.ot>0?` +${b.ot}ot`:""}</span><span style={{fontSize:13,fontWeight:700,color:C.green,minWidth:55,textAlign:"right"}}>£{b?.gross.toFixed(2)}</span></>}
+            <div style={{fontSize:12,fontWeight:800,color:isConfirmed?C.green:off?C.muted:C.yellow,minWidth:32}}>{d}</div>
+            {off&&!isConfirmed
+              ?<span style={{fontSize:12,color:C.muted,fontStyle:"italic",flex:1}}>Off / Not allocated</span>
+              :<>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:5}}>
+                    {forecastSite&&<Badge label={forecastSite.trim()} color={col}/>}
+                    <span style={{fontSize:10,fontWeight:700,color:isConfirmed?C.green:C.yellow}}>
+                      {isConfirmed?"✅ Confirmed":"📋 Forecast — not signed in"}
+                    </span>
+                  </div>
+                  {isConfirmed&&dayLogs.map((l,i)=><div key={l.id} style={{fontSize:10,color:C.muted,marginTop:3}}>
+                    Entry #{l.entryNum||i+1}: {fmtTime(l.signIn)} → {fmtTime(l.signOut)}{l.otHours>0?` · OT: ${l.otHours.toFixed(1)}h`:""}
+                  </div>)}
+                </div>
+                {isConfirmed&&<span style={{fontSize:13,fontWeight:800,color:C.green}}>{dayTotal.toFixed(1)}h</span>}
+              </>}
           </div>
         </Card>;
       })}
     </div>
+
+    {/* Summary */}
     <Card style={{background:"linear-gradient(135deg,#0d2218,#1a3020)",border:`1px solid ${C.green}44`}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-        <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>Week Summary</div>
+        <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>Confirmed Week Summary</div>
         {currentPs&&<Badge label={currentPs.status==="paid"?"✓ PAID":"Pending"} color={currentPs.status==="paid"?C.green:C.yellow}/>}
       </div>
-      {[["Gross Pay","£"+gross.toFixed(2),C.green],[`Tax (${taxPct}%)`,"-£"+taxAmt.toFixed(2),C.red],["Net Pay","£"+net.toFixed(2),C.purple]].map(([l,v,c])=>
+      {[["Gross Pay","£"+confirmedPay.gross.toFixed(2),C.green],[`Tax (${taxPct}%)`,"-£"+confirmedPay.taxAmt.toFixed(2),C.red],["Net Pay","£"+confirmedPay.net.toFixed(2),C.purple]].map(([l,v,c])=>
         <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.muted}}>{l}</span><span style={{fontSize:13,fontWeight:700,color:c}}>{v}</span></div>
       )}
-      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0"}}><span style={{fontSize:13,fontWeight:800,color:C.sub}}>NET TO ACCOUNT</span><span style={{fontSize:20,fontWeight:900,color:C.green}}>£{net.toFixed(2)}</span></div>
+      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0"}}><span style={{fontSize:13,fontWeight:800,color:C.sub}}>NET TO ACCOUNT</span><span style={{fontSize:20,fontWeight:900,color:C.green}}>£{confirmedPay.net.toFixed(2)}</span></div>
+      {confirmedLogs.length===0&&<div style={{marginTop:8,fontSize:11,color:C.yellow,textAlign:"center"}}>No GPS confirmations yet this week — sign in on site to confirm your days.</div>}
     </Card>
   </div>;
 }
@@ -661,9 +720,12 @@ function Dashboard({worker:iw,weekLabel,siteHours,allSites,payslips,onLogout}){
         {certAlerts.length>0&&<div style={{marginTop:6,background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,display:"flex",alignItems:"center",gap:8}}><span>⚠️</span><span>{certAlerts.length} cert{certAlerts.length!==1?"s":""} need attention</span></div>}
       </div>
       <div style={{display:"flex",background:"#111827",borderBottom:`1px solid ${C.border}`,padding:"6px 8px",gap:3}}>
-        {[["signin","📍 Sign In/Out"],["timesheet","📅 Timesheet"],["history","📋 History"+(hasPaidNotif?" 🔴":"")],["certs","🛡 Certs"+(certAlerts.length>0?" ⚠️":"")],["profile","👤 Profile"]].map(([v,l])=>(
-          <button key={v} onClick={()=>setTab(v)} style={{flex:1,padding:"7px 3px",background:tab===v?"#1e3a5f":"transparent",border:tab===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:7,color:tab===v?C.accent:C.muted,cursor:"pointer",fontSize:11,fontWeight:tab===v?700:400}}>{l}</button>
-        ))}
+        {(()=>{
+          const unreadNotifs=(worker.routeNotifications||[]).filter(n=>n.weekLabel===weekLabel&&!n.seen).length;
+          return [["signin","📍 Sign In/Out"+(unreadNotifs>0?` 🔔${unreadNotifs}`:"")],["timesheet","📅 Timesheet"],["history","📋 History"+(hasPaidNotif?" 🔴":"")],["certs","🛡 Certs"+(certAlerts.length>0?" ⚠️":"")],["profile","👤 Profile"]].map(([v,l])=>(
+            <button key={v} onClick={()=>setTab(v)} style={{flex:1,padding:"7px 3px",background:tab===v?"#1e3a5f":"transparent",border:tab===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:7,color:tab===v?C.accent:C.muted,cursor:"pointer",fontSize:11,fontWeight:tab===v?700:400}}>{l}</button>
+          ));
+        })()}
       </div>
       {tab==="signin"&&<SignInOutView worker={worker} allSites={allSites} weekLabel={weekLabel} onUpdateWorker={setWorker}/>}
       {tab==="timesheet"&&<TimesheetView worker={worker} weekLabel={weekLabel} siteHours={siteHours} allSites={allSites} payslips={payslips}/>}
@@ -825,12 +887,17 @@ function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
       }
       setPhase("signing");setSaving(true);
       const signOutTime=new Date().toISOString();
+      // Calculate hours worked and OT using site parameters
+      const totalHrs=hoursFromMs(new Date(signOutTime)-new Date(activeLog.signIn));
+      const otThreshold=site.otThreshold||site.stdHours||9;
+      const stdHrsWorked=Math.min(totalHrs,otThreshold);
+      const otHrsWorked=Math.max(0,Math.round((totalHrs-otThreshold)*100)/100);
 
-      // Update the log entry
+      // Update the log entry with OT breakdown
       const newLogs=(worker.attendanceLogs||[]).map(l=>
         l.id===activeLog.id
           ?{...l,signOut:signOutTime,signOutLat:coords.latitude,signOutLng:coords.longitude,distanceAtSignOut:dist,
-            hoursWorked:hoursFromMs(new Date(signOutTime)-new Date(l.signIn))}
+            hoursWorked:totalHrs,stdHours:stdHrsWorked,otHours:otHrsWorked}
           :l
       );
 
@@ -838,9 +905,7 @@ function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
       const tsKey=`ts_${worker.id}_${weekLabel.replace(/\s+/g,"_")}`;
       const timesheets=(worker.timesheets||[]).map(t=>{
         if(t.id!==tsKey)return t;
-        const signInMs=new Date(activeLog.signIn).getTime();
-        const signOutMs=new Date(signOutTime).getTime();
-        const hrs=hoursFromMs(signOutMs-signInMs);
+        const hrs=totalHrs;
         // Find existing entry for this log or create new
         const entryExists=t.entries?.find(e=>e.logId===activeLog.id);
         const entry={
@@ -851,6 +916,8 @@ function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
           signIn:activeLog.signIn,
           signOut:signOutTime,
           hours:hrs,
+          stdHours:stdHrsWorked,
+          otHours:otHrsWorked,
           entryNum:activeLog.entryNum||1,
         };
         const entries=entryExists
@@ -885,7 +952,65 @@ function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
   const isDetecting=phase==="detecting";
   const isSigning=phase==="signing";
 
+  // Route change notifications for this week
+  const routeNotifs=(worker.routeNotifications||[]).filter(n=>n.weekLabel===weekLabel&&!n.seen);
+  const dismissNotif=async(id)=>{
+    const updated={...worker,routeNotifications:(worker.routeNotifications||[]).map(n=>n.id===id?{...n,seen:true}:n)};
+    onUpdateWorker(updated);
+    try{await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});}catch(e){}
+  };
+
+  // My Week Ahead — forecast from worker.days
+  const ALL_WEEK_DAYS=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  const forecastDays=ALL_WEEK_DAYS.filter(d=>worker.days?.[d]&&worker.days[d].trim());
+
   return <div style={{padding:14}}>
+
+    {/* ── ROUTE CHANGE NOTIFICATIONS ── */}
+    {routeNotifs.length>0&&<div style={{marginBottom:14}}>
+      {routeNotifs.map(n=><div key={n.id} style={{background:"#1a1500",border:`1px solid ${C.yellow}44`,borderRadius:10,padding:"10px 13px",marginBottom:7,display:"flex",alignItems:"flex-start",gap:10}}>
+        <span style={{fontSize:16,flexShrink:0}}>🔔</span>
+        <div style={{flex:1}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.yellow}}>Route Updated — WC {n.weekLabel}</div>
+          <div style={{fontSize:12,color:C.sub,marginTop:2}}>
+            <strong>{n.day}</strong>: changed from <span style={{color:C.red}}>"{n.from}"</span> to <span style={{color:C.green}}>"{n.to}"</span>
+          </div>
+          <div style={{fontSize:10,color:C.muted,marginTop:2}}>{new Date(n.changedAt).toLocaleString("en-GB",{dateStyle:"short",timeStyle:"short"})}</div>
+        </div>
+        <button onClick={()=>dismissNotif(n.id)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",color:C.muted,cursor:"pointer",fontSize:11}}>✓ OK</button>
+      </div>)}
+    </div>}
+
+    {/* ── MY WEEK AHEAD (forecast) ── */}
+    {forecastDays.length>0&&<Card style={{marginBottom:14,border:`1px solid #3b82f644`}}>
+      <div style={{fontSize:12,fontWeight:800,color:C.text,marginBottom:10}}>🗺 My Week Ahead — Forecast</div>
+      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+        {ALL_WEEK_DAYS.map(d=>{
+          const site=worker.days?.[d];
+          const off=!site||isOff(site);
+          const confirmedLog=(worker.attendanceLogs||[]).find(l=>l.day===d&&l.weekLabel===weekLabel&&l.signIn&&l.signOut);
+          const activeLog2=(worker.attendanceLogs||[]).find(l=>l.day===d&&l.weekLabel===weekLabel&&l.signIn&&!l.signOut);
+          const col=siteColor(site,allSites);
+          const isToday=d===TODAY;
+          if(off&&!isToday)return null;
+          return <div key={d} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 10px",background:isToday?"#1a1f2e":C.bg,borderRadius:8,border:`1px solid ${isToday?C.accent+"44":confirmedLog?C.green+"33":C.border}`}}>
+            <div style={{fontSize:11,fontWeight:isToday?800:600,color:isToday?C.accent:C.sub,minWidth:28}}>{d}</div>
+            {off
+              ?<span style={{fontSize:11,color:C.muted,fontStyle:"italic",flex:1}}>Off / Not allocated</span>
+              :<><div style={{flex:1,display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{width:7,height:7,borderRadius:"50%",background:col,flexShrink:0}}/>
+                  <span style={{fontSize:12,fontWeight:600,color:C.text}}>{site.trim()}</span>
+                </div>
+                <span style={{fontSize:11,fontWeight:700,
+                  color:confirmedLog?C.green:activeLog2?C.yellow:C.muted}}>
+                  {confirmedLog?"✅ Confirmed":activeLog2?"● On site now":"📋 Forecast"}
+                </span>
+              </>}
+          </div>;
+        }).filter(Boolean)}
+      </div>
+      <div style={{marginTop:8,fontSize:10,color:C.muted}}>✅ Confirmed = GPS sign in recorded · 📋 Forecast = allocated but not yet signed in</div>
+    </Card>}
 
     {/* ── TODAY STATUS CARD ── */}
     <Card style={{marginBottom:14,border:`1px solid ${isSignedIn?C.green+"44":C.border}`}}>
@@ -1013,7 +1138,10 @@ function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
               return <div key={l.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:C.muted,padding:"3px 6px",background:C.bg,borderRadius:5}}>
                 <span style={{minWidth:14}}>#{l.entryNum||i+1}</span>
                 <span style={{flex:1}}>{fmtTime(l.signIn)} → {l.signOut?fmtTime(l.signOut):"on site"}</span>
-                <span style={{color:l.signOut?C.green:C.yellow,fontWeight:600}}>{hrs?hrs.toFixed(1)+"h":"live"}</span>
+                <span style={{color:l.signOut?C.green:C.yellow,fontWeight:600}}>
+                {hrs?hrs.toFixed(1)+"h":"live"}
+                {l.otHours>0&&<span style={{color:"#fbbf24",fontSize:9,marginLeft:3}}>(+{l.otHours.toFixed(1)}h OT)</span>}
+              </span>
               </div>;
             })}
           </div>}
