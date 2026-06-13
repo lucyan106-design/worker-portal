@@ -699,184 +699,337 @@ function hoursFromMs(ms){return Math.round((ms/3600000)*100)/100;}
 
 // ─── SIGN IN/OUT VIEW ─────────────────────────────────────────────────────────
 function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
-  const [status,setStatus]=useState("idle"); // idle | locating | blocked | signed-in
-  const [userLat,setUserLat]=useState(null);
-  const [userLng,setUserLng]=useState(null);
-  const [distance,setDistance]=useState(null);
-  const [selectedSiteId,setSelectedSiteId]=useState("");
+  const TODAY=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getDay()];
+  const [phase,setPhase]=useState("idle"); // idle | detecting | confirm | signing | blocked
   const [error,setError]=useState("");
   const [saving,setSaving]=useState(false);
+  const [nearbySites,setNearbySites]=useState([]); // [{site,dist}] sorted by distance
+  const [confirmedSite,setConfirmedSite]=useState(null);
+  const [userCoords,setUserCoords]=useState(null);
 
-  // Today's key
-  const TODAY=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getDay()];
-  const todayLog=worker.attendanceLogs?.find(l=>l.day===TODAY&&l.weekLabel===weekLabel);
-  const isSignedIn=todayLog&&todayLog.signIn&&!todayLog.signOut;
+  // All logs for this week
+  const weekLogs=useMemo(()=>(worker.attendanceLogs||[]).filter(l=>l.weekLabel===weekLabel),[worker,weekLabel]);
+  // Today's logs (multiple allowed)
+  const todayLogs=useMemo(()=>weekLogs.filter(l=>l.day===TODAY),[weekLogs,TODAY]);
+  // Currently active (signed in but not out)
+  const activeLog=useMemo(()=>todayLogs.find(l=>l.signIn&&!l.signOut),[todayLogs]);
+  const isSignedIn=!!activeLog;
 
-  const validSites=allSites.filter(s=>!isOff(s.name)&&s.lat&&s.lng);
-  const allSignableSites=allSites.filter(s=>!isOff(s.name));
+  // Sites with GPS
+  const gpsSites=useMemo(()=>allSites.filter(s=>!isOff(s.name)&&s.lat&&s.lng),[allSites]);
 
   const getLocation=()=>new Promise((res,rej)=>{
-    if(!navigator.geolocation){rej(new Error("Geolocation not supported by your browser."));return;}
+    if(!navigator.geolocation){rej(new Error("Geolocation not supported. Please use a modern browser."));return;}
     navigator.geolocation.getCurrentPosition(
-      p=>{setUserLat(p.coords.latitude);setUserLng(p.coords.longitude);res(p.coords);},
-      e=>{rej(new Error("Could not get your location. Please enable location access and try again."));},
-      {enableHighAccuracy:true,timeout:15000,maximumAge:30000}
+      p=>res(p.coords),
+      ()=>rej(new Error("Could not get your location. Please enable location access in your browser settings and try again.")),
+      {enableHighAccuracy:true,timeout:15000,maximumAge:0}
     );
   });
 
-  const handleSignIn=async()=>{
-    setError("");setStatus("locating");
-    const site=allSites.find(s=>s.id===selectedSiteId);
-    if(!site){setError("Please select a site first.");setStatus("idle");return;}
+  // ── Detect nearby sites ──────────────────────────────────────────────────────
+  const detectSites=async()=>{
+    setError("");setPhase("detecting");setNearbySites([]);setConfirmedSite(null);
     try{
       const coords=await getLocation();
-      // Check perimeter if site has GPS coords
-      if(site.lat&&site.lng){
-        const dist=Math.round(getDistanceMetres(coords.latitude,coords.longitude,site.lat,site.lng));
-        setDistance(dist);
-        if(dist>100){
-          setStatus("blocked");
-          setError(`You are ${dist}m from ${site.name}. You must be within 100m to sign in.`);
-          return;
-        }
+      setUserCoords(coords);
+      // Find all sites within their perimeter
+      const nearby=gpsSites
+        .map(site=>{
+          const dist=Math.round(getDistanceMetres(coords.latitude,coords.longitude,site.lat,site.lng));
+          return{site,dist,within:dist<=(site.radius||100)};
+        })
+        .filter(x=>x.dist<=(site=>site.radius||100)(x.site)*3) // show anything within 3x perimeter
+        .sort((a,b)=>a.dist-b.dist);
+
+      if(nearby.length===0){
+        setPhase("blocked");
+        setError("No sites detected nearby. You must be near a registered site to sign in. Make sure your GPS is on and you are at your work location.");
+        return;
       }
-      // Record sign in
-      setSaving(true);
-      const log={id:"log_"+Date.now(),day:TODAY,weekLabel,siteId:site.id,siteName:site.name,signIn:new Date().toISOString(),signOut:null,lat:coords.latitude,lng:coords.longitude};
-      const logs=[...(worker.attendanceLogs||[]),log];
-      const updated={...worker,attendanceLogs:logs};
+      setNearbySites(nearby);
+      setPhase("confirm");
+    }catch(e){setError(e.message);setPhase("idle");}
+  };
+
+  // ── Confirm and sign in ──────────────────────────────────────────────────────
+  const confirmSignIn=async(site,dist)=>{
+    if(!site.lat||!site.lng){setError(`${site.name} has no GPS set.`);return;}
+    if(dist>(site.radius||100)){
+      setError(`You are ${dist}m from ${site.name}. You must be within ${site.radius||100}m to sign in.`);
+      return;
+    }
+    setPhase("signing");setSaving(true);setError("");
+    try{
+      const now=new Date();
+      const log={
+        id:"log_"+Date.now(),
+        day:TODAY,
+        weekLabel,
+        siteId:site.id,
+        siteName:site.name,
+        signIn:now.toISOString(),
+        signOut:null,
+        lat:userCoords.latitude,
+        lng:userCoords.longitude,
+        distanceAtSignIn:dist,
+        entryNum:todayLogs.length+1, // track which entry this is for the day
+      };
+
+      const newLogs=[...(worker.attendanceLogs||[]),log];
+
+      // ── Auto-create or update weekly timesheet ─────────────────────────────
+      // Timesheet key: one per worker per week
+      const tsKey=`ts_${worker.id}_${weekLabel.replace(/\s+/g,"_")}`;
+      const existingTs=(worker.timesheets||[]).find(t=>t.id===tsKey);
+      const updatedTs=existingTs
+        ? {...existingTs,updatedAt:now.toISOString()}
+        : {
+            id:tsKey,
+            workerId:worker.id,
+            workerName:worker.name,
+            weekLabel,
+            createdAt:now.toISOString(),
+            updatedAt:now.toISOString(),
+            status:"open",
+            entries:[],
+          };
+      const timesheets=existingTs
+        ? (worker.timesheets||[]).map(t=>t.id===tsKey?updatedTs:t)
+        : [...(worker.timesheets||[]),updatedTs];
+
+      const updated={...worker,attendanceLogs:newLogs,timesheets};
       await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});
       onUpdateWorker(updated);
-      setStatus("signed-in");
-    }catch(e){setError(e.message);setStatus("idle");}
+      setPhase("idle");setNearbySites([]);setConfirmedSite(null);
+    }catch(e){setError(e.message);setPhase("idle");}
     setSaving(false);
   };
 
+  // ── Sign out ─────────────────────────────────────────────────────────────────
   const handleSignOut=async()=>{
-    setError("");setStatus("locating");
-    const site=allSites.find(s=>s.id===todayLog.siteId);
+    if(!activeLog)return;
+    setError("");setPhase("detecting");
+    const site=allSites.find(s=>s.id===activeLog.siteId);
+    if(!site?.lat||!site?.lng){
+      setError(`${site?.name||"This site"} has no GPS set. Contact your supervisor.`);
+      setPhase("idle");return;
+    }
     try{
       const coords=await getLocation();
-      if(site?.lat&&site?.lng){
-        const dist=Math.round(getDistanceMetres(coords.latitude,coords.longitude,site.lat,site.lng));
-        setDistance(dist);
-        if(dist>100){
-          setStatus("blocked");
-          setError(`You are ${dist}m from ${site?.name||"the site"}. You must be within 100m to sign out.`);
-          return;
-        }
+      const dist=Math.round(getDistanceMetres(coords.latitude,coords.longitude,site.lat,site.lng));
+      if(dist>(site.radius||100)){
+        setPhase("blocked");
+        setError(`You are ${dist}m from ${site.name}. You must be within ${site.radius||100}m to sign out.`);
+        return;
       }
-      setSaving(true);
+      setPhase("signing");setSaving(true);
       const signOutTime=new Date().toISOString();
-      const logs=(worker.attendanceLogs||[]).map(l=>l.id===todayLog.id?{...l,signOut:signOutTime,signOutLat:coords.latitude,signOutLng:coords.longitude}:l);
-      const updated={...worker,attendanceLogs:logs};
+
+      // Update the log entry
+      const newLogs=(worker.attendanceLogs||[]).map(l=>
+        l.id===activeLog.id
+          ?{...l,signOut:signOutTime,signOutLat:coords.latitude,signOutLng:coords.longitude,distanceAtSignOut:dist,
+            hoursWorked:hoursFromMs(new Date(signOutTime)-new Date(l.signIn))}
+          :l
+      );
+
+      // Update timesheet entry for this day
+      const tsKey=`ts_${worker.id}_${weekLabel.replace(/\s+/g,"_")}`;
+      const timesheets=(worker.timesheets||[]).map(t=>{
+        if(t.id!==tsKey)return t;
+        const signInMs=new Date(activeLog.signIn).getTime();
+        const signOutMs=new Date(signOutTime).getTime();
+        const hrs=hoursFromMs(signOutMs-signInMs);
+        // Find existing entry for this log or create new
+        const entryExists=t.entries?.find(e=>e.logId===activeLog.id);
+        const entry={
+          logId:activeLog.id,
+          day:TODAY,
+          siteId:site.id,
+          siteName:site.name,
+          signIn:activeLog.signIn,
+          signOut:signOutTime,
+          hours:hrs,
+          entryNum:activeLog.entryNum||1,
+        };
+        const entries=entryExists
+          ?t.entries.map(e=>e.logId===activeLog.id?entry:e)
+          :[...(t.entries||[]),entry];
+        // Sum total daily hours per day
+        const dailyTotals={};
+        entries.forEach(e=>{dailyTotals[e.day]=(dailyTotals[e.day]||0)+e.hours;});
+        return{...t,entries,dailyTotals,updatedAt:new Date().toISOString()};
+      });
+
+      const updated={...worker,attendanceLogs:newLogs,timesheets};
       await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});
       onUpdateWorker(updated);
-      setStatus("idle");
-    }catch(e){setError(e.message);setStatus("idle");}
+      setPhase("idle");
+    }catch(e){setError(e.message);setPhase("idle");}
     setSaving(false);
   };
 
-  const signInMs=todayLog?.signIn?new Date(todayLog.signIn).getTime():null;
-  const signOutMs=todayLog?.signOut?new Date(todayLog.signOut).getTime():null;
-  const hoursWorked=signInMs&&signOutMs?hoursFromMs(signOutMs-signInMs):signInMs?hoursFromMs(Date.now()-signInMs):null;
+  // ── Today's total hours ──────────────────────────────────────────────────────
+  const todayTotal=todayLogs.reduce((a,l)=>{
+    if(!l.signOut)return a+hoursFromMs(Date.now()-new Date(l.signIn).getTime());
+    return a+hoursFromMs(new Date(l.signOut)-new Date(l.signIn));
+  },0);
 
-  // Weekly attendance summary
-  const weekLogs=(worker.attendanceLogs||[]).filter(l=>l.weekLabel===weekLabel);
+  // ── Weekly total ─────────────────────────────────────────────────────────────
+  const weekTotal=weekLogs.reduce((a,l)=>{
+    if(!l.signOut)return a;
+    return a+hoursFromMs(new Date(l.signOut)-new Date(l.signIn));
+  },0);
+
+  const isDetecting=phase==="detecting";
+  const isSigning=phase==="signing";
 
   return <div style={{padding:14}}>
-    {/* Today card */}
-    <Card style={{marginBottom:14,border:`1px solid ${isSignedIn?C.green+"44":C.border}`}}>
-      <div style={{fontSize:13,fontWeight:800,color:C.text,marginBottom:4}}>Today — {TODAY}</div>
-      <div style={{fontSize:11,color:C.muted,marginBottom:14}}>WC {weekLabel}</div>
 
-      {/* Status indicator */}
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,padding:"10px 13px",background:C.bg,borderRadius:9,border:`1px solid ${isSignedIn?C.green+"44":todayLog?.signOut?C.purple+"44":C.border}`}}>
-        <div style={{width:12,height:12,borderRadius:"50%",background:isSignedIn?C.green:todayLog?.signOut?C.purple:C.muted,flexShrink:0,boxShadow:isSignedIn?`0 0 8px ${C.green}`:""}}/>
-        <div style={{flex:1}}>
-          <div style={{fontSize:13,fontWeight:700,color:isSignedIn?C.green:todayLog?.signOut?C.purple:C.muted}}>
-            {isSignedIn?"● On Site":todayLog?.signOut?"✓ Signed Out Today":"Not Signed In"}
-          </div>
-          {todayLog&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>
-            {todayLog.siteName} · In: {fmtTime(todayLog.signIn)}{todayLog.signOut?` · Out: ${fmtTime(todayLog.signOut)}`:" · Still on site"}
-          </div>}
+    {/* ── TODAY STATUS CARD ── */}
+    <Card style={{marginBottom:14,border:`1px solid ${isSignedIn?C.green+"44":C.border}`}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+        <div>
+          <div style={{fontSize:14,fontWeight:800,color:C.text}}>Today — {TODAY}</div>
+          <div style={{fontSize:11,color:C.muted}}>WC {weekLabel}</div>
         </div>
-        {hoursWorked!==null&&<div style={{textAlign:"right"}}>
-          <div style={{fontSize:16,fontWeight:900,color:C.green}}>{hoursWorked}h</div>
-          <div style={{fontSize:9,color:C.muted}}>{todayLog?.signOut?"worked":"so far"}</div>
+        {todayLogs.length>0&&<div style={{textAlign:"right"}}>
+          <div style={{fontSize:18,fontWeight:900,color:C.green}}>{todayTotal.toFixed(1)}h</div>
+          <div style={{fontSize:9,color:C.muted}}>today total</div>
         </div>}
       </div>
 
+      {/* Active sign-in indicator */}
+      {isSignedIn&&<div style={{display:"flex",alignItems:"center",gap:9,padding:"9px 12px",background:C.bg,borderRadius:9,border:`1px solid ${C.green}44`,marginBottom:12}}>
+        <div style={{width:10,height:10,borderRadius:"50%",background:C.green,flexShrink:0,boxShadow:`0 0 8px ${C.green}`,animation:"pulse 2s infinite"}}/>
+        <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}`}</style>
+        <div style={{flex:1}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.green}}>● On Site — {activeLog.siteName}</div>
+          <div style={{fontSize:10,color:C.muted}}>Signed in {fmtTime(activeLog.signIn)} · Entry #{activeLog.entryNum||1} today</div>
+        </div>
+        <div style={{fontSize:14,fontWeight:800,color:C.yellow}}>{hoursFromMs(Date.now()-new Date(activeLog.signIn).getTime()).toFixed(1)}h</div>
+      </div>}
+
+      {/* Previous entries today */}
+      {todayLogs.filter(l=>l.signOut).length>0&&<div style={{marginBottom:12}}>
+        <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",marginBottom:6}}>Today's Entries</div>
+        {todayLogs.filter(l=>l.signOut).map((l,i)=>{
+          const hrs=hoursFromMs(new Date(l.signOut)-new Date(l.signIn));
+          return <div key={l.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",background:C.bg,borderRadius:7,marginBottom:4,fontSize:11}}>
+            <span style={{color:C.muted,minWidth:18}}>#{l.entryNum||i+1}</span>
+            <span style={{color:C.sub,flex:1}}>{l.siteName}</span>
+            <span style={{color:C.muted}}>{fmtTime(l.signIn)} → {fmtTime(l.signOut)}</span>
+            <span style={{color:C.green,fontWeight:700,minWidth:32,textAlign:"right"}}>{hrs.toFixed(1)}h</span>
+          </div>;
+        })}
+      </div>}
+
       {/* Error */}
-      {error&&<div style={{background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:8,padding:"10px 13px",marginBottom:14,fontSize:12,color:C.red}}>
-        {status==="blocked"?"🚫 Outside perimeter — ":""}{error}
-        {userLat&&userLng&&<div style={{marginTop:4,fontSize:10,color:"#94a3b8"}}>Your location: {userLat.toFixed(5)}, {userLng.toFixed(5)}</div>}
+      {error&&<div style={{background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:8,padding:"10px 12px",marginBottom:12,fontSize:12,color:C.red,lineHeight:1.5}}>
+        {phase==="blocked"?"🚫 ":""}{error}
+        {phase==="blocked"&&<div style={{marginTop:8}}><button onClick={()=>{setPhase("idle");setError("");}} style={{padding:"5px 12px",background:"#1e2535",border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,cursor:"pointer",fontSize:11}}>← Try Again</button></div>}
       </div>}
 
-      {/* Sign IN */}
-      {!isSignedIn&&!todayLog?.signOut&&<div>
-        <div style={{marginBottom:10}}>
-          <Lbl>Select your site for today</Lbl>
-          <select value={selectedSiteId} onChange={e=>setSelectedSiteId(e.target.value)}
-            style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 13px",color:selectedSiteId?C.text:C.muted,fontSize:14,outline:"none",boxSizing:"border-box",cursor:"pointer"}}>
-            <option value="">— Select site —</option>
-            {allSignableSites.map(s=><option key={s.id} value={s.id}>{s.name}{s.lat?"":" (no GPS)"}</option>)}
-          </select>
-          {selectedSiteId&&!allSites.find(s=>s.id===selectedSiteId)?.lat&&
-            <div style={{fontSize:11,color:C.yellow,marginTop:5}}>⚠ This site has no GPS coordinates set — sign in will be allowed from anywhere.</div>}
+      {/* ── DETECT button (idle state) ── */}
+      {!isSignedIn&&phase==="idle"&&<button onClick={detectSites}
+        style={{width:"100%",background:"linear-gradient(135deg,#1e3a5f,#3b82f6)",border:"none",borderRadius:10,padding:"14px",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>
+        📍 Detect My Location & Sign In
+      </button>}
+
+      {/* Detecting spinner */}
+      {isDetecting&&<div style={{textAlign:"center",padding:"18px 0",color:C.accent,fontSize:13,fontWeight:600}}>
+        <div style={{fontSize:28,marginBottom:8}}>📡</div>
+        Getting your GPS location…
+      </div>}
+
+      {/* ── CONFIRM screen — show nearby sites ── */}
+      {phase==="confirm"&&nearbySites.length>0&&<div>
+        <div style={{fontSize:12,fontWeight:700,color:C.text,marginBottom:10}}>
+          {nearbySites.filter(x=>x.within).length>0
+            ?"Sites detected nearby — tap to sign in:"
+            :"No sites within perimeter. Closest sites:"}
         </div>
-        <button onClick={handleSignIn} disabled={!selectedSiteId||status==="locating"||saving}
-          style={{width:"100%",background:selectedSiteId?"linear-gradient(135deg,#14532d,#16a34a)":"#1e2535",border:`1px solid ${selectedSiteId?C.green:C.border}`,borderRadius:10,padding:"14px",color:selectedSiteId?"#fff":C.muted,fontSize:15,fontWeight:800,cursor:selectedSiteId&&status!=="locating"?"pointer":"not-allowed",opacity:saving?0.7:1}}>
-          {status==="locating"?"📍 Getting your location…":saving?"Signing in…":"✅ Sign In"}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:10}}>
+          {nearbySites.slice(0,4).map(({site,dist,within})=>{
+            const col=siteColor(site.name,allSites);
+            return <button key={site.id} onClick={()=>within&&confirmSignIn(site,dist)} disabled={!within||isSigning}
+              style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",background:within?"#0d2218":"#1a1f2e",border:`2px solid ${within?C.green:C.border}`,borderRadius:10,cursor:within?"pointer":"not-allowed",textAlign:"left",opacity:within?1:0.5}}>
+              <div style={{width:10,height:10,borderRadius:"50%",background:col,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:700,color:within?C.text:C.muted}}>{site.name}</div>
+                <div style={{fontSize:11,color:within?C.green:C.red,fontWeight:600}}>
+                  {within?`✓ ${dist}m away — within ${site.radius||100}m perimeter`:`${dist}m away — outside ${site.radius||100}m perimeter`}
+                </div>
+              </div>
+              {within&&<div style={{fontSize:13,fontWeight:800,color:C.green}}>{isSigning?"…":"Sign In ✓"}</div>}
+            </button>;
+          })}
+        </div>
+        <button onClick={()=>{setPhase("idle");setNearbySites([]);setError("");}}
+          style={{width:"100%",padding:"9px",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,color:C.muted,cursor:"pointer",fontSize:12}}>
+          Cancel
         </button>
       </div>}
 
-      {/* Sign OUT */}
-      {isSignedIn&&<div>
-        <div style={{background:"#0d2218",borderRadius:9,padding:"10px 13px",marginBottom:14,fontSize:12,color:C.green}}>
-          Signed in to <strong>{todayLog.siteName}</strong> at {fmtTime(todayLog.signIn)} · {hoursWorked}h on site so far
-        </div>
-        <button onClick={handleSignOut} disabled={status==="locating"||saving}
-          style={{width:"100%",background:"linear-gradient(135deg,#1a1f2e,#2d1515)",border:`1px solid ${C.red}`,borderRadius:10,padding:"14px",color:C.red,fontSize:15,fontWeight:800,cursor:"pointer",opacity:saving?0.7:1}}>
-          {status==="locating"?"📍 Getting your location…":saving?"Signing out…":"🔴 Sign Out"}
-        </button>
-      </div>}
+      {/* ── SIGN OUT button (when signed in) ── */}
+      {isSignedIn&&phase!=="confirm"&&<button onClick={handleSignOut} disabled={isDetecting||isSigning}
+        style={{width:"100%",background:"linear-gradient(135deg,#2d1515,#7f1d1d)",border:`1px solid ${C.red}`,borderRadius:10,padding:"14px",color:C.red,fontSize:15,fontWeight:800,cursor:"pointer",opacity:isDetecting||isSigning?0.7:1}}>
+        {isDetecting?"📍 Getting location…":isSigning?"Signing out…":"🔴 Sign Out"}
+      </button>}
 
-      {/* Already done today */}
-      {todayLog?.signOut&&<div style={{textAlign:"center",padding:"10px 0",fontSize:13,color:C.muted}}>
-        You have already signed out today. See your time below.
+      {/* Sign in again after signing out */}
+      {!isSignedIn&&phase==="idle"&&todayLogs.length>0&&<div style={{marginTop:10,textAlign:"center",fontSize:11,color:C.muted}}>
+        Entry #{todayLogs.length+1} — tap above to sign in again
       </div>}
     </Card>
 
-    {/* This week's attendance */}
+    {/* ── WEEKLY TIMESHEET SUMMARY ── */}
     {weekLogs.length>0&&<div>
-      <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>This Week's Attendance</div>
-      <div style={{display:"flex",flexDirection:"column",gap:7}}>
-        {weekLogs.map(l=>{
-          const inMs=new Date(l.signIn).getTime(),outMs=l.signOut?new Date(l.signOut).getTime():null;
-          const hrs=outMs?hoursFromMs(outMs-inMs):hoursFromMs(Date.now()-inMs);
-          const col=siteColor(l.siteName,allSites);
-          return <Card key={l.id} style={{borderLeft:`3px solid ${col}`,padding:"10px 13px"}}>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <div style={{fontSize:12,fontWeight:800,color:C.text,minWidth:32}}>{l.day}</div>
-              <div style={{flex:1}}>
-                <div style={{fontSize:12,fontWeight:600,color:C.text}}>{l.siteName}</div>
-                <div style={{fontSize:11,color:C.muted}}>{fmtTime(l.signIn)} → {l.signOut?fmtTime(l.signOut):"still on site"}</div>
-              </div>
-              <div style={{textAlign:"right"}}>
-                <div style={{fontSize:14,fontWeight:800,color:l.signOut?C.green:C.yellow}}>{hrs}h</div>
-                <div style={{fontSize:9,color:C.muted}}>{l.signOut?"done":"live"}</div>
-              </div>
-            </div>
-          </Card>;
-        })}
-        <Card style={{background:"linear-gradient(135deg,#0d2218,#1a3020)",border:`1px solid ${C.green}44`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:12,fontWeight:700,color:C.muted}}>Total this week</span>
-            <span style={{fontSize:18,fontWeight:900,color:C.green}}>{weekLogs.reduce((a,l)=>{const inMs=new Date(l.signIn).getTime(),outMs=l.signOut?new Date(l.signOut).getTime():null;return a+(outMs?hoursFromMs(outMs-inMs):0);},0).toFixed(1)}h</span>
-          </div>
-        </Card>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+        <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>This Week's Timesheet</div>
+        <div style={{fontSize:12,fontWeight:800,color:C.green}}>{weekTotal.toFixed(1)}h total</div>
       </div>
+      {/* Group by day */}
+      {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(day=>{
+        const dayLogs=weekLogs.filter(l=>l.day===day);
+        if(dayLogs.length===0)return null;
+        const dayTotal=dayLogs.reduce((a,l)=>l.signOut?a+hoursFromMs(new Date(l.signOut)-new Date(l.signIn)):a,0);
+        const col=siteColor(dayLogs[0].siteName,allSites);
+        return <Card key={day} style={{borderLeft:`3px solid ${col}`,padding:"10px 13px",marginBottom:7}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:dayLogs.length>1?7:0}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:800,color:C.text}}>{day}</div>
+              <div style={{fontSize:10,color:C.muted}}>{dayLogs[0].siteName}{dayLogs.length>1?` +${dayLogs.length-1} more`:""}</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:14,fontWeight:800,color:C.green}}>{dayTotal>0?dayTotal.toFixed(1)+"h":"in progress"}</div>
+              <div style={{fontSize:9,color:C.muted}}>{dayLogs.length} {dayLogs.length===1?"entry":"entries"}</div>
+            </div>
+          </div>
+          {dayLogs.length>1&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
+            {dayLogs.map((l,i)=>{
+              const hrs=l.signOut?hoursFromMs(new Date(l.signOut)-new Date(l.signIn)):null;
+              return <div key={l.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:C.muted,padding:"3px 6px",background:C.bg,borderRadius:5}}>
+                <span style={{minWidth:14}}>#{l.entryNum||i+1}</span>
+                <span style={{flex:1}}>{fmtTime(l.signIn)} → {l.signOut?fmtTime(l.signOut):"on site"}</span>
+                <span style={{color:l.signOut?C.green:C.yellow,fontWeight:600}}>{hrs?hrs.toFixed(1)+"h":"live"}</span>
+              </div>;
+            })}
+          </div>}
+        </Card>;
+      }).filter(Boolean)}
+      {/* Weekly timesheet status */}
+      {(()=>{
+        const tsKey=`ts_${worker.id}_${weekLabel.replace(/\s+/g,"_")}`;
+        const ts=(worker.timesheets||[]).find(t=>t.id===tsKey);
+        if(!ts)return null;
+        return <div style={{background:"#0d2218",border:`1px solid ${C.green}44`,borderRadius:9,padding:"9px 13px",marginTop:4,display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12}}>📋</span>
+          <span style={{fontSize:11,color:C.green,fontWeight:600}}>Timesheet auto-created for WC {weekLabel}</span>
+          <span style={{marginLeft:"auto",fontSize:10,color:C.muted}}>Status: {ts.status}</span>
+        </div>;
+      })()}
     </div>}
   </div>;
 }
