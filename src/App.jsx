@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 
 // ─── Supabase ─────────────────────────────────────────────────────────────────
 const SB_URL = "https://xljglqiifogyxefhszwa.supabase.co";
-const SB_KEY = "sb_publishable_sjP2pkelZOMSDR45qwyH_g_v6KSB41k";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsamdscWlpZm9neXhlZmhzendhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwMTY2MTQsImV4cCI6MjA5NjU5MjYxNH0.asql85bUrgL5JuzqYoU0ZtizIWJ1yU6NYTt3yMUW5us";
 const SB_H   = {"Content-Type":"application/json","apikey":SB_KEY,"Authorization":`Bearer ${SB_KEY}`};
 async function sbGet(t,f=""){const r=await fetch(`${SB_URL}/rest/v1/${t}?${f}`,{headers:SB_H});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function sbPatch(t,f,d){const r=await fetch(`${SB_URL}/rest/v1/${t}?${f}`,{method:"PATCH",headers:{...SB_H,"Prefer":"return=minimal"},body:JSON.stringify(d)});if(!r.ok)throw new Error(await r.text());}
@@ -661,24 +661,14 @@ function Dashboard({worker:iw,weekLabel,siteHours,allSites,payslips,onLogout}){
         {certAlerts.length>0&&<div style={{marginTop:6,background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,display:"flex",alignItems:"center",gap:8}}><span>⚠️</span><span>{certAlerts.length} cert{certAlerts.length!==1?"s":""} need attention</span></div>}
       </div>
       <div style={{display:"flex",background:"#111827",borderBottom:`1px solid ${C.border}`,padding:"6px 8px",gap:3}}>
-        {[["timesheet","📅 Timesheet"],["history","📋 History"+(hasPaidNotif?" 🔴":"")],["certs","🛡 Certs"+(certAlerts.length>0?" ⚠️":"")],["profile","👤 Profile"]].map(([v,l])=>(
+        {[["signin","📍 Sign In/Out"],["timesheet","📅 Timesheet"],["history","📋 History"+(hasPaidNotif?" 🔴":"")],["certs","🛡 Certs"+(certAlerts.length>0?" ⚠️":"")],["profile","👤 Profile"]].map(([v,l])=>(
           <button key={v} onClick={()=>setTab(v)} style={{flex:1,padding:"7px 3px",background:tab===v?"#1e3a5f":"transparent",border:tab===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:7,color:tab===v?C.accent:C.muted,cursor:"pointer",fontSize:11,fontWeight:tab===v?700:400}}>{l}</button>
         ))}
       </div>
+      {tab==="signin"&&<SignInOutView worker={worker} allSites={allSites} weekLabel={weekLabel} onUpdateWorker={setWorker}/>}
       {tab==="timesheet"&&<TimesheetView worker={worker} weekLabel={weekLabel} siteHours={siteHours} allSites={allSites} payslips={payslips}/>}
       {tab==="history"&&<PayslipHistory worker={worker} payslips={payslips}/>}
-      {tab==="certs"&&<div style={{padding:14}}>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginBottom:14}}>
-          {[["Held",CERTS.filter(c=>worker.certs?.[c.key]?.held).length,C.accent],["Valid",CERTS.filter(c=>certStatus(c,worker)==="valid").length,C.green],["Soon",CERTS.filter(c=>certStatus(c,worker)==="expiring").length,C.yellow],["Expired",CERTS.filter(c=>certStatus(c,worker)==="expired").length,C.red]].map(([l,v,c])=><KPI key={l} label={l} value={v} color={c}/>)}
-        </div>
-        {CERTS.filter(c=>worker.certs?.[c.key]?.held).map(cert=>{const s=certStatus(cert,worker);const val=worker.certs[cert.key];const CERT_C={valid:C.green,expiring:C.yellow,expired:C.red,missing:"#64748b"};return(
-          <Card key={cert.key} style={{borderLeft:`3px solid ${CERT_C[s]}44`,padding:"10px 14px",marginBottom:7}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:13,fontWeight:600,color:C.text}}>{cert.label}</span><Badge label={s==="valid"?"✓ Valid":s.toUpperCase()} color={CERT_C[s]}/></div>
-            {cert.hasExpiry&&val?.expiry&&<div style={{fontSize:11,color:C.muted,marginTop:3}}>Expires: <span style={{fontWeight:600}}>{fmtDate(val.expiry)}</span></div>}
-            {val?.photoUrl&&<img src={val.photoUrl} alt={cert.label} style={{marginTop:8,width:"100%",maxHeight:90,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"pointer"}} onClick={()=>window.open(val.photoUrl,"_blank")}/>}
-          </Card>);})}
-        {!CERTS.some(c=>worker.certs?.[c.key]?.held)&&<Card style={{textAlign:"center",padding:28}}><div style={{fontSize:28,marginBottom:8}}>🛡</div><div style={{color:C.muted,fontSize:13}}>No certifications recorded yet.</div></Card>}
-      </div>}
+      {tab==="certs"&&<EditCertsView worker={worker} onSave={setWorker}/>}
       {tab==="profile"&&<PersonalView worker={worker} onSave={setWorker}/>}
       <div style={{padding:"10px 16px",textAlign:"center",fontSize:11,color:C.muted,borderTop:`1px solid ${C.border}`,marginTop:8}}>Bright Metalwork Ltd · Worker Portal</div>
     </div>
@@ -696,4 +686,272 @@ export default function App(){
   if(loading)return <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif"}}><div style={{textAlign:"center"}}><div style={{fontSize:28,marginBottom:12}}>🏗</div><div style={{color:C.accent,fontWeight:700}}>Loading…</div></div></div>;
   if(worker)return <Dashboard worker={worker} weekLabel={appData.weekLabel} siteHours={appData.siteHours} allSites={appData.allSites} payslips={appData.payslips} onLogout={()=>setWorker(null)}/>;
   return <LoginScreen onLoginSuccess={handleLoginSuccess}/>;
+}
+
+// ─── GPS helpers ──────────────────────────────────────────────────────────────
+function getDistanceMetres(lat1,lng1,lat2,lng2){
+  const R=6371000,dLat=(lat2-lat1)*Math.PI/180,dLng=(lng2-lng1)*Math.PI/180;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function fmtTime(iso){return iso?new Date(iso).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}):"—";}
+function hoursFromMs(ms){return Math.round((ms/3600000)*100)/100;}
+
+// ─── SIGN IN/OUT VIEW ─────────────────────────────────────────────────────────
+function SignInOutView({worker,allSites,weekLabel,onUpdateWorker}){
+  const [status,setStatus]=useState("idle"); // idle | locating | blocked | signed-in
+  const [userLat,setUserLat]=useState(null);
+  const [userLng,setUserLng]=useState(null);
+  const [distance,setDistance]=useState(null);
+  const [selectedSiteId,setSelectedSiteId]=useState("");
+  const [error,setError]=useState("");
+  const [saving,setSaving]=useState(false);
+
+  // Today's key
+  const TODAY=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getDay()];
+  const todayLog=worker.attendanceLogs?.find(l=>l.day===TODAY&&l.weekLabel===weekLabel);
+  const isSignedIn=todayLog&&todayLog.signIn&&!todayLog.signOut;
+
+  const validSites=allSites.filter(s=>!isOff(s.name)&&s.lat&&s.lng);
+  const allSignableSites=allSites.filter(s=>!isOff(s.name));
+
+  const getLocation=()=>new Promise((res,rej)=>{
+    if(!navigator.geolocation){rej(new Error("Geolocation not supported by your browser."));return;}
+    navigator.geolocation.getCurrentPosition(
+      p=>{setUserLat(p.coords.latitude);setUserLng(p.coords.longitude);res(p.coords);},
+      e=>{rej(new Error("Could not get your location. Please enable location access and try again."));},
+      {enableHighAccuracy:true,timeout:15000,maximumAge:30000}
+    );
+  });
+
+  const handleSignIn=async()=>{
+    setError("");setStatus("locating");
+    const site=allSites.find(s=>s.id===selectedSiteId);
+    if(!site){setError("Please select a site first.");setStatus("idle");return;}
+    try{
+      const coords=await getLocation();
+      // Check perimeter if site has GPS coords
+      if(site.lat&&site.lng){
+        const dist=Math.round(getDistanceMetres(coords.latitude,coords.longitude,site.lat,site.lng));
+        setDistance(dist);
+        if(dist>100){
+          setStatus("blocked");
+          setError(`You are ${dist}m from ${site.name}. You must be within 100m to sign in.`);
+          return;
+        }
+      }
+      // Record sign in
+      setSaving(true);
+      const log={id:"log_"+Date.now(),day:TODAY,weekLabel,siteId:site.id,siteName:site.name,signIn:new Date().toISOString(),signOut:null,lat:coords.latitude,lng:coords.longitude};
+      const logs=[...(worker.attendanceLogs||[]),log];
+      const updated={...worker,attendanceLogs:logs};
+      await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});
+      onUpdateWorker(updated);
+      setStatus("signed-in");
+    }catch(e){setError(e.message);setStatus("idle");}
+    setSaving(false);
+  };
+
+  const handleSignOut=async()=>{
+    setError("");setStatus("locating");
+    const site=allSites.find(s=>s.id===todayLog.siteId);
+    try{
+      const coords=await getLocation();
+      if(site?.lat&&site?.lng){
+        const dist=Math.round(getDistanceMetres(coords.latitude,coords.longitude,site.lat,site.lng));
+        setDistance(dist);
+        if(dist>100){
+          setStatus("blocked");
+          setError(`You are ${dist}m from ${site?.name||"the site"}. You must be within 100m to sign out.`);
+          return;
+        }
+      }
+      setSaving(true);
+      const signOutTime=new Date().toISOString();
+      const logs=(worker.attendanceLogs||[]).map(l=>l.id===todayLog.id?{...l,signOut:signOutTime,signOutLat:coords.latitude,signOutLng:coords.longitude}:l);
+      const updated={...worker,attendanceLogs:logs};
+      await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});
+      onUpdateWorker(updated);
+      setStatus("idle");
+    }catch(e){setError(e.message);setStatus("idle");}
+    setSaving(false);
+  };
+
+  const signInMs=todayLog?.signIn?new Date(todayLog.signIn).getTime():null;
+  const signOutMs=todayLog?.signOut?new Date(todayLog.signOut).getTime():null;
+  const hoursWorked=signInMs&&signOutMs?hoursFromMs(signOutMs-signInMs):signInMs?hoursFromMs(Date.now()-signInMs):null;
+
+  // Weekly attendance summary
+  const weekLogs=(worker.attendanceLogs||[]).filter(l=>l.weekLabel===weekLabel);
+
+  return <div style={{padding:14}}>
+    {/* Today card */}
+    <Card style={{marginBottom:14,border:`1px solid ${isSignedIn?C.green+"44":C.border}`}}>
+      <div style={{fontSize:13,fontWeight:800,color:C.text,marginBottom:4}}>Today — {TODAY}</div>
+      <div style={{fontSize:11,color:C.muted,marginBottom:14}}>WC {weekLabel}</div>
+
+      {/* Status indicator */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,padding:"10px 13px",background:C.bg,borderRadius:9,border:`1px solid ${isSignedIn?C.green+"44":todayLog?.signOut?C.purple+"44":C.border}`}}>
+        <div style={{width:12,height:12,borderRadius:"50%",background:isSignedIn?C.green:todayLog?.signOut?C.purple:C.muted,flexShrink:0,boxShadow:isSignedIn?`0 0 8px ${C.green}`:""}}/>
+        <div style={{flex:1}}>
+          <div style={{fontSize:13,fontWeight:700,color:isSignedIn?C.green:todayLog?.signOut?C.purple:C.muted}}>
+            {isSignedIn?"● On Site":todayLog?.signOut?"✓ Signed Out Today":"Not Signed In"}
+          </div>
+          {todayLog&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>
+            {todayLog.siteName} · In: {fmtTime(todayLog.signIn)}{todayLog.signOut?` · Out: ${fmtTime(todayLog.signOut)}`:" · Still on site"}
+          </div>}
+        </div>
+        {hoursWorked!==null&&<div style={{textAlign:"right"}}>
+          <div style={{fontSize:16,fontWeight:900,color:C.green}}>{hoursWorked}h</div>
+          <div style={{fontSize:9,color:C.muted}}>{todayLog?.signOut?"worked":"so far"}</div>
+        </div>}
+      </div>
+
+      {/* Error */}
+      {error&&<div style={{background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:8,padding:"10px 13px",marginBottom:14,fontSize:12,color:C.red}}>
+        {status==="blocked"?"🚫 Outside perimeter — ":""}{error}
+        {userLat&&userLng&&<div style={{marginTop:4,fontSize:10,color:"#94a3b8"}}>Your location: {userLat.toFixed(5)}, {userLng.toFixed(5)}</div>}
+      </div>}
+
+      {/* Sign IN */}
+      {!isSignedIn&&!todayLog?.signOut&&<div>
+        <div style={{marginBottom:10}}>
+          <Lbl>Select your site for today</Lbl>
+          <select value={selectedSiteId} onChange={e=>setSelectedSiteId(e.target.value)}
+            style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:9,padding:"11px 13px",color:selectedSiteId?C.text:C.muted,fontSize:14,outline:"none",boxSizing:"border-box",cursor:"pointer"}}>
+            <option value="">— Select site —</option>
+            {allSignableSites.map(s=><option key={s.id} value={s.id}>{s.name}{s.lat?"":" (no GPS)"}</option>)}
+          </select>
+          {selectedSiteId&&!allSites.find(s=>s.id===selectedSiteId)?.lat&&
+            <div style={{fontSize:11,color:C.yellow,marginTop:5}}>⚠ This site has no GPS coordinates set — sign in will be allowed from anywhere.</div>}
+        </div>
+        <button onClick={handleSignIn} disabled={!selectedSiteId||status==="locating"||saving}
+          style={{width:"100%",background:selectedSiteId?"linear-gradient(135deg,#14532d,#16a34a)":"#1e2535",border:`1px solid ${selectedSiteId?C.green:C.border}`,borderRadius:10,padding:"14px",color:selectedSiteId?"#fff":C.muted,fontSize:15,fontWeight:800,cursor:selectedSiteId&&status!=="locating"?"pointer":"not-allowed",opacity:saving?0.7:1}}>
+          {status==="locating"?"📍 Getting your location…":saving?"Signing in…":"✅ Sign In"}
+        </button>
+      </div>}
+
+      {/* Sign OUT */}
+      {isSignedIn&&<div>
+        <div style={{background:"#0d2218",borderRadius:9,padding:"10px 13px",marginBottom:14,fontSize:12,color:C.green}}>
+          Signed in to <strong>{todayLog.siteName}</strong> at {fmtTime(todayLog.signIn)} · {hoursWorked}h on site so far
+        </div>
+        <button onClick={handleSignOut} disabled={status==="locating"||saving}
+          style={{width:"100%",background:"linear-gradient(135deg,#1a1f2e,#2d1515)",border:`1px solid ${C.red}`,borderRadius:10,padding:"14px",color:C.red,fontSize:15,fontWeight:800,cursor:"pointer",opacity:saving?0.7:1}}>
+          {status==="locating"?"📍 Getting your location…":saving?"Signing out…":"🔴 Sign Out"}
+        </button>
+      </div>}
+
+      {/* Already done today */}
+      {todayLog?.signOut&&<div style={{textAlign:"center",padding:"10px 0",fontSize:13,color:C.muted}}>
+        You have already signed out today. See your time below.
+      </div>}
+    </Card>
+
+    {/* This week's attendance */}
+    {weekLogs.length>0&&<div>
+      <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>This Week's Attendance</div>
+      <div style={{display:"flex",flexDirection:"column",gap:7}}>
+        {weekLogs.map(l=>{
+          const inMs=new Date(l.signIn).getTime(),outMs=l.signOut?new Date(l.signOut).getTime():null;
+          const hrs=outMs?hoursFromMs(outMs-inMs):hoursFromMs(Date.now()-inMs);
+          const col=siteColor(l.siteName,allSites);
+          return <Card key={l.id} style={{borderLeft:`3px solid ${col}`,padding:"10px 13px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div style={{fontSize:12,fontWeight:800,color:C.text,minWidth:32}}>{l.day}</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:12,fontWeight:600,color:C.text}}>{l.siteName}</div>
+                <div style={{fontSize:11,color:C.muted}}>{fmtTime(l.signIn)} → {l.signOut?fmtTime(l.signOut):"still on site"}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:14,fontWeight:800,color:l.signOut?C.green:C.yellow}}>{hrs}h</div>
+                <div style={{fontSize:9,color:C.muted}}>{l.signOut?"done":"live"}</div>
+              </div>
+            </div>
+          </Card>;
+        })}
+        <Card style={{background:"linear-gradient(135deg,#0d2218,#1a3020)",border:`1px solid ${C.green}44`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:12,fontWeight:700,color:C.muted}}>Total this week</span>
+            <span style={{fontSize:18,fontWeight:900,color:C.green}}>{weekLogs.reduce((a,l)=>{const inMs=new Date(l.signIn).getTime(),outMs=l.signOut?new Date(l.signOut).getTime():null;return a+(outMs?hoursFromMs(outMs-inMs):0);},0).toFixed(1)}h</span>
+          </div>
+        </Card>
+      </div>
+    </div>}
+  </div>;
+}
+
+// ─── EDIT CERTS VIEW (added to profile tab) ───────────────────────────────────
+function EditCertsView({worker,onSave}){
+  const [certs,setCerts]=useState({...worker.certs});
+  const [uploading,setUploading]=useState({});
+  const [saving,setSaving]=useState(false);
+  const [saved,setSaved]=useState(false);
+
+  const toggle=key=>setCerts(c=>({...c,[key]:{...c[key],held:!c[key]?.held}}));
+  const setExpiry=(key,val)=>setCerts(c=>({...c,[key]:{...c[key],expiry:val}}));
+  const handlePhoto=async(key,file)=>{
+    if(!file)return;setUploading(u=>({...u,[key]:true}));
+    try{const url=await uploadCertPhoto(file,worker.id,key);setCerts(c=>({...c,[key]:{...c[key],photoUrl:url}}));}
+    catch(e){alert("Upload failed: "+e.message);}
+    setUploading(u=>({...u,[key]:false}));
+  };
+  const save=async()=>{
+    setSaving(true);setSaved(false);
+    try{const updated={...worker,certs};await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});onSave(updated);setSaved(true);setTimeout(()=>setSaved(false),3000);}
+    catch(e){alert("Save failed: "+e.message);}
+    setSaving(false);
+  };
+
+  const CERT_C={valid:C.green,expiring:C.yellow,expired:C.red,missing:"#64748b"};
+  const getStatus=(cert)=>{const v=certs[cert.key];if(!v||!v.held)return "missing";if(!cert.hasExpiry||!v.expiry)return "valid";const d=(new Date(v.expiry)-new Date())/86400000;return d<0?"expired":d<30?"expiring":"valid";};
+
+  return <div style={{padding:14}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:800,color:C.text}}>🛡 My Certifications</div>
+      <button onClick={save} disabled={saving} style={{padding:"7px 14px",background:"#14532d",border:`1px solid ${C.green}`,borderRadius:8,color:C.green,cursor:"pointer",fontSize:12,fontWeight:700,opacity:saving?0.7:1}}>
+        {saving?"Saving…":saved?"✓ Saved!":"💾 Save Changes"}
+      </button>
+    </div>
+    <div style={{fontSize:12,color:C.muted,marginBottom:14}}>Tick each certification you hold. Add expiry dates and upload photos of your cards.</div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {CERTS.map(cert=>{
+        const held=certs[cert.key]?.held||false;
+        const expiry=certs[cert.key]?.expiry||"";
+        const photoUrl=certs[cert.key]?.photoUrl||"";
+        const isUp=uploading[cert.key];
+        const s=getStatus(cert);
+        return <div key={cert.key} style={{background:C.bg,borderRadius:10,border:`1px solid ${held?CERT_C[s]+"44":C.border}`,overflow:"hidden"}}>
+          <div onClick={()=>toggle(cert.key)} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px",cursor:"pointer"}}>
+            <div style={{width:22,height:22,borderRadius:6,background:held?C.accent:C.card,border:`2px solid ${held?C.accent:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              {held&&<span style={{color:"#fff",fontSize:13,fontWeight:900}}>✓</span>}
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,fontWeight:held?700:400,color:held?C.text:C.sub}}>{cert.label}</div>
+              {cert.hasExpiry&&<div style={{fontSize:10,color:C.muted}}>Has expiry date</div>}
+            </div>
+            {held&&<Badge label={s==="valid"?"✓ Valid":s==="expiring"?"⚠ Expiring":s==="expired"?"✗ Expired":"Held"} color={CERT_C[s]}/>}
+          </div>
+          {held&&<div style={{padding:"0 13px 13px",borderTop:`1px solid ${C.border}`}}>
+            {cert.hasExpiry&&<div style={{marginTop:10}}>
+              <Lbl>Expiry Date</Lbl>
+              <input type="date" value={expiry} onChange={e=>setExpiry(cert.key,e.target.value)}
+                style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 10px",color:C.text,fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
+              {expiry&&s==="expiring"&&<div style={{fontSize:11,color:C.yellow,marginTop:4}}>⚠ Expiring soon — please renew</div>}
+              {expiry&&s==="expired"&&<div style={{fontSize:11,color:C.red,marginTop:4}}>✗ This certification has expired</div>}
+            </div>}
+            <div style={{marginTop:10}}>
+              <Lbl>Photo of Certificate</Lbl>
+              <label style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",background:C.card,border:`1px dashed ${photoUrl?C.green:C.border}`,borderRadius:8,cursor:"pointer"}}>
+                <span style={{fontSize:16}}>{isUp?"⏳":photoUrl?"✅":"📷"}</span>
+                <span style={{fontSize:12,color:photoUrl?C.green:C.muted,fontWeight:photoUrl?700:400}}>{isUp?"Uploading…":photoUrl?"Uploaded — tap to replace":"Tap to upload photo"}</span>
+                <input type="file" accept="image/*,application/pdf" style={{display:"none"}} onChange={e=>handlePhoto(cert.key,e.target.files[0])}/>
+              </label>
+              {photoUrl&&<img src={photoUrl} alt={cert.label} style={{marginTop:8,width:"100%",maxHeight:100,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"pointer"}} onClick={()=>window.open(photoUrl,"_blank")}/>}
+            </div>
+          </div>}
+        </div>;
+      })}
+    </div>
+  </div>;
 }
