@@ -2,14 +2,42 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
+    <!-- PWA manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Theme & status bar -->
     <meta name="theme-color" content="#0a0e1a" />
+    <meta name="background-color" content="#0a0e1a" />
+
+    <!-- iOS PWA ("Add to Home Screen") -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BM Portal" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+    <!-- Android Chrome -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="BM Portal" />
+
+    <!-- Description / SEO (minimal — internal tool) -->
+    <meta name="description" content="Bright Metalwork Worker Portal — GPS sign-in, timesheets and certifications." />
+    <meta name="robots" content="noindex, nofollow" />
+
     <title>Bright Metalwork — Worker Portal</title>
+
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: #0a0e1a; color: #f1f5f9; }
+      body {
+        background: #0a0e1a;
+        color: #f1f5f9;
+        /* Prevent iOS rubber-band scroll on the root body */
+        overscroll-behavior: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* Prevent flash of unstyled content */
+      #root { min-height: 100svh; }
     </style>
   </head>
   <body>
