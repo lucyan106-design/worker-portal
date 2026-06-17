@@ -1,6 +1,34 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LONDON-TIME WEEK HELPERS — the whole system runs on Europe/London time and
+// the working week starts Monday 00:00. These must match the admin app exactly.
+// ─────────────────────────────────────────────────────────────────────────────
+function londonNow(){
+  return new Date(new Date().toLocaleString("en-US",{timeZone:"Europe/London"}));
+}
+function mondayOfWeek(date){
+  const d=new Date(date);
+  const dow=(d.getDay()+6)%7; // 0=Mon … 6=Sun
+  d.setDate(d.getDate()-dow);
+  d.setHours(0,0,0,0);
+  return d;
+}
+function fmtWeekLabel(d){
+  return d.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"});
+}
+// The week-commencing label for *this* week, in London terms.
+function currentWeekLabel(){ return fmtWeekLabel(mondayOfWeek(londonNow())); }
+// Which week does a specific timestamp belong to?
+function weekLabelForDate(iso){ return fmtWeekLabel(mondayOfWeek(new Date(iso))); }
+// London day-of-week short code ("Mon".."Sun").
+function londonDayCode(){ return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][londonNow().getDay()]; }
+// Today's date in London, short ("Tue 17 Jun").
+function londonTodayLabel(){ return londonNow().toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"}); }
+// Live London clock ("06:52").
+function londonClock(){ return new Date().toLocaleTimeString("en-GB",{timeZone:"Europe/London",hour:"2-digit",minute:"2-digit"}); }
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SUPABASE CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 const SB_URL  = "https://xljglqiifogyxefhszwa.supabase.co";
@@ -807,8 +835,10 @@ function AnnouncementsPanel({ announcements, worker, onDismiss }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // SIGN IN / OUT VIEW (GPS, override, announcements)
 // ─────────────────────────────────────────────────────────────────────────────
-function SignInOutView({ worker, allSites, weekLabel, announcements, onUpdateWorker }) {
-  const TODAY   = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getDay()];
+function SignInOutView({ worker, allSites, weekLabel:cfgWeekLabel, announcements, onUpdateWorker }) {
+  const TODAY   = londonDayCode();
+  // Always trust the live London week over whatever the admin config last wrote.
+  const weekLabel = currentWeekLabel();
   const [phase, setPhase]         = useState("idle"); // idle|detecting|confirm|signing|outside
   const [error, setError]         = useState("");
   const [saving,setSaving]        = useState(false);
@@ -954,26 +984,10 @@ function SignInOutView({ worker, allSites, weekLabel, announcements, onUpdateWor
 
   const forecastDays = ALL_DAYS.filter(d=>worker.days?.[d]&&worker.days[d].trim());
 
-  // Calculate actual calendar date for each day of the week
+  // Calculate actual calendar date for each day of the week (London Monday)
   const weekDates = useMemo(()=>{
-    const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
     const MNAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-    let monday = null;
-    try {
-      const parts = weekLabel.trim().split(/\s+/);
-      if (parts.length >= 3) {
-        const candidate = new Date(parseInt(parts[2]), MONTHS[parts[1]], parseInt(parts[0]));
-        if (!isNaN(candidate.getTime())) monday = candidate;
-      }
-    } catch {}
-    if (!monday) {
-      // Fallback: compute Monday of current real week
-      const now = new Date();
-      const dow = now.getDay(); // 0=Sun
-      monday = new Date(now);
-      monday.setDate(now.getDate() - (dow===0 ? 6 : dow-1));
-      monday.setHours(0,0,0,0);
-    }
+    const monday = mondayOfWeek(londonNow());
     return Object.fromEntries(ALL_DAYS.map((d,i)=>{
       const dt = new Date(monday);
       dt.setDate(monday.getDate()+i);
@@ -1708,12 +1722,20 @@ function PersonalView({ worker, onSave, documents }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────────────────────
-function Dashboard({ worker:iw, weekLabel, siteHours, allSites, payslips, announcements, documents, onLogout, onRefresh, refreshing }) {
+function Dashboard({ worker:iw, weekLabel:cfgWeekLabel, siteHours, allSites, payslips, announcements, documents, onLogout, onRefresh, refreshing }) {
   const [worker, setWorker] = useState(iw);
   const [tab,    setTab]    = useState("attendance");
+  const [clock,  setClock]  = useState(()=>({today:londonTodayLabel(),time:londonClock()}));
+  // The portal always shows the live London week, not whatever config last wrote.
+  const weekLabel = currentWeekLabel();
 
   // Sync if parent refreshes worker data
   useEffect(()=>{ setWorker(iw); },[iw]);
+  // Tick the clock every 30s
+  useEffect(()=>{
+    const t=setInterval(()=>setClock({today:londonTodayLabel(),time:londonClock()}),30000);
+    return()=>clearInterval(t);
+  },[]);
 
   const hasPaidNotif  = payslips.some(p=>p.status==="paid"&&!p.workerAcknowledged);
   const certAlerts    = CERTS.filter(c=>{const s=certStatus(c,worker);return s==="expired"||s==="expiring";});
@@ -1746,7 +1768,12 @@ function Dashboard({ worker:iw, weekLabel, siteHours, allSites, payslips, announ
           </button>
           <button onClick={onLogout} style={{background:"#1e2535",border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px",color:C.muted,cursor:"pointer",fontSize:12,fontWeight:600}}>Sign out</button>
         </div>
-        <div style={{fontSize:11,color:C.muted}}>Week commencing <span style={{color:C.accent,fontWeight:700}}>{weekLabel}</span></div>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <div style={{fontSize:11,color:C.muted}}>Week commencing <span style={{color:C.accent,fontWeight:700}}>{weekLabel}</span></div>
+          <span style={{fontSize:10,color:"#475569"}}>·</span>
+          <div style={{fontSize:11,color:C.muted}}>Today <span style={{color:C.sub,fontWeight:600}}>{clock.today}</span></div>
+          <span style={{fontSize:11,color:C.green,fontWeight:700,fontFamily:"ui-monospace,monospace"}}>{clock.time} <span style={{color:"#475569",fontWeight:400}}>GMT</span></span>
+        </div>
         {hasPaidNotif&&<div style={{marginTop:8,background:"#0d2218",border:`1px solid ${C.green}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.green,display:"flex",alignItems:"center",gap:8}}><span>💷</span><span>New paid payslip — check Records</span></div>}
         {certAlerts.length>0&&<div style={{marginTop:6,background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.red,display:"flex",alignItems:"center",gap:8}}><span>⚠️</span><span>{certAlerts.length} cert{certAlerts.length!==1?"s":""} need attention</span></div>}
       </div>
