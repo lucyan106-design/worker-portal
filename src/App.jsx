@@ -954,6 +954,33 @@ function SignInOutView({ worker, allSites, weekLabel, announcements, onUpdateWor
 
   const forecastDays = ALL_DAYS.filter(d=>worker.days?.[d]&&worker.days[d].trim());
 
+  // Calculate actual calendar date for each day of the week
+  const weekDates = useMemo(()=>{
+    const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+    const MNAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    let monday = null;
+    try {
+      const parts = weekLabel.trim().split(/\s+/);
+      if (parts.length >= 3) {
+        const candidate = new Date(parseInt(parts[2]), MONTHS[parts[1]], parseInt(parts[0]));
+        if (!isNaN(candidate.getTime())) monday = candidate;
+      }
+    } catch {}
+    if (!monday) {
+      // Fallback: compute Monday of current real week
+      const now = new Date();
+      const dow = now.getDay(); // 0=Sun
+      monday = new Date(now);
+      monday.setDate(now.getDate() - (dow===0 ? 6 : dow-1));
+      monday.setHours(0,0,0,0);
+    }
+    return Object.fromEntries(ALL_DAYS.map((d,i)=>{
+      const dt = new Date(monday);
+      dt.setDate(monday.getDate()+i);
+      return [d, dt.getDate()+" "+MNAMES[dt.getMonth()]];
+    }));
+  },[weekLabel]);
+
   return <div style={{padding:14}}>
 
     {/* Announcements */}
@@ -982,8 +1009,13 @@ function SignInOutView({ worker, allSites, weekLabel, announcements, onUpdateWor
           const active2=(worker.attendanceLogs||[]).find(l=>l.day===d&&l.weekLabel===weekLabel&&l.signIn&&!l.signOut);
           const col=siteColor(site,allSites), isToday=d===TODAY;
           if (off&&!isToday) return null;
-          return <div key={d} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 10px",background:isToday?"#1a1f2e":C.bg,borderRadius:8,border:`1px solid ${isToday?C.accent+"44":confirmed?C.green+"33":C.border}`}}>
-            <div style={{fontSize:11,fontWeight:isToday?800:600,color:isToday?C.accent:C.sub,minWidth:28}}>{d}</div>
+          return <div key={d} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:isToday?"#1a1f2e":C.bg,borderRadius:8,border:`1px solid ${isToday?C.accent+"44":confirmed?C.green+"33":C.border}`}}>
+            <div style={{minWidth:82,flexShrink:0}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                <div style={{fontSize:12,fontWeight:isToday?800:700,color:isToday?C.accent:C.sub}}>{d}</div>
+                <div style={{fontSize:11,fontWeight:600,color:isToday?C.text:C.sub}}>{weekDates[d]||""}</div>
+              </div>
+            </div>
             {off
               ?<span style={{fontSize:11,color:C.muted,fontStyle:"italic",flex:1}}>Off / Not allocated</span>
               :<><div style={{flex:1,display:"flex",alignItems:"center",gap:6}}>
@@ -1004,7 +1036,7 @@ function SignInOutView({ worker, allSites, weekLabel, announcements, onUpdateWor
     <Card style={{marginBottom:14,border:`1px solid ${isSignedIn?C.green+"44":C.border}`}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
         <div>
-          <div style={{fontSize:14,fontWeight:800,color:C.text}}>Today — {TODAY}</div>
+          <div style={{fontSize:14,fontWeight:800,color:C.text}}>Today — {TODAY}{weekDates[TODAY]?" · "+weekDates[TODAY]:""}</div>
           <div style={{fontSize:11,color:C.muted}}>WC {weekLabel}</div>
         </div>
         {todayLogs.length>0&&<div style={{textAlign:"right"}}>
@@ -1418,13 +1450,14 @@ function DocumentsView({ documents }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EDIT CERTS VIEW — sorted by status (expired → expiring → valid → missing)
+// EDIT CERTS VIEW — shows only held certs; Add Cert button opens full list
 // ─────────────────────────────────────────────────────────────────────────────
 function EditCertsView({ worker, onSave }) {
-  const [certs,    setCerts]    = useState({...worker.certs});
-  const [uploading,setUploading]= useState({});
-  const [saving,   setSaving]   = useState(false);
-  const [saved,    setSaved]    = useState(false);
+  const [certs,       setCerts]       = useState({...(worker.certs||{})});
+  const [uploading,   setUploading]   = useState({});
+  const [saving,      setSaving]      = useState(false);
+  const [saved,       setSaved]       = useState(false);
+  const [showAddPanel,setShowAddPanel]= useState(false);
 
   const toggle    = key => setCerts(c=>({...c,[key]:{...c[key],held:!c[key]?.held}}));
   const setExpiry = (key,val) => setCerts(c=>({...c,[key]:{...c[key],expiry:val}}));
@@ -1436,12 +1469,15 @@ function EditCertsView({ worker, onSave }) {
   };
   const save = async () => {
     setSaving(true); setSaved(false);
-    try { const updated={...worker,certs}; await sbPatch("workers",`id=eq.${worker.id}`,{data:updated}); onSave(updated); setSaved(true); setTimeout(()=>setSaved(false),3000); }
-    catch(e) { alert("Save failed: "+e.message); }
+    try {
+      const updated={...worker,certs};
+      await sbPatch("workers",`id=eq.${worker.id}`,{data:updated});
+      onSave(updated); setSaved(true); setTimeout(()=>setSaved(false),3000);
+    } catch(e) { alert("Save failed: "+e.message); }
     setSaving(false);
   };
 
-  const CERT_C = {valid:C.green, expiring:C.yellow, expired:C.red, missing:"#64748b"};
+  const CERT_C = {valid:C.green, expiring:C.yellow, expired:C.red};
   const getStatus = cert => {
     const v = certs[cert.key];
     if (!v?.held) return "missing";
@@ -1450,54 +1486,112 @@ function EditCertsView({ worker, onSave }) {
     return d<0?"expired":d<30?"expiring":"valid";
   };
 
-  // Sort: expired → expiring → valid → missing
-  const sortedCerts = [...CERTS].sort((a,b)=>CERT_STATUS_ORDER[getStatus(a)]-CERT_STATUS_ORDER[getStatus(b)]);
+  // Only held certs, sorted by urgency
+  const heldCerts = [...CERTS]
+    .filter(c => certs[c.key]?.held)
+    .sort((a,b) => CERT_STATUS_ORDER[getStatus(a)]-CERT_STATUS_ORDER[getStatus(b)]);
 
-  // Summary counts
-  const counts = { expired:0,expiring:0,valid:0,missing:0 };
-  CERTS.forEach(c=>counts[getStatus(c)]++);
+  // Certs not yet added (for the Add panel)
+  const notHeldCerts = CERTS.filter(c => !certs[c.key]?.held);
 
+  // KPI counts (only from held certs)
+  const counts = {valid:0, expiring:0, expired:0};
+  heldCerts.forEach(c => { const s=getStatus(c); if (counts[s]!==undefined) counts[s]++; });
+
+  const addCert = key => {
+    setCerts(c=>({...c,[key]:{...c[key],held:true}}));
+    setShowAddPanel(false);
+  };
+  const removeCert = key => setCerts(c=>({...c,[key]:{...c[key],held:false}}));
+
+  // ── ADD PANEL ───────────────────────────────────────────────────────────────
+  if (showAddPanel) return (
+    <div style={{padding:14}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${C.border}`}}>
+        <button onClick={()=>setShowAddPanel(false)}
+          style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.sub,cursor:"pointer",fontSize:13}}>← Back</button>
+        <div>
+          <div style={{fontSize:14,fontWeight:800,color:C.text}}>Add Certification</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:1}}>Tap a certification to add it to your profile</div>
+        </div>
+      </div>
+      {notHeldCerts.length===0
+        ?<div style={{textAlign:"center",padding:"28px 0"}}>
+          <div style={{fontSize:32,marginBottom:10}}>🎉</div>
+          <div style={{color:C.muted,fontSize:13}}>All certifications are already on your profile!</div>
+          <button onClick={()=>setShowAddPanel(false)} style={{marginTop:14,padding:"8px 20px",background:"#1e3a5f",border:`1px solid ${C.accent}`,borderRadius:8,color:C.accent,cursor:"pointer",fontSize:12,fontWeight:700}}>← Back to my certs</button>
+        </div>
+        :<div style={{display:"flex",flexDirection:"column",gap:7}}>
+          {notHeldCerts.map(cert=>(
+            <div key={cert.key} onClick={()=>addCert(cert.key)}
+              style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",background:C.card,border:`1px solid ${C.border}`,borderRadius:10,cursor:"pointer"}}>
+              <div style={{width:22,height:22,borderRadius:6,background:C.bg,border:`2px solid ${C.border}`,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,color:C.sub}}>{cert.label}</div>
+                {cert.hasExpiry&&<div style={{fontSize:10,color:C.muted,marginTop:1}}>Requires expiry date</div>}
+              </div>
+              <span style={{fontSize:13,color:C.accent,fontWeight:700}}>+ Add</span>
+            </div>
+          ))}
+        </div>}
+    </div>
+  );
+
+  // ── MAIN VIEW (held certs only) ─────────────────────────────────────────────
   return <div style={{padding:14}}>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+    {/* Header */}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
       <div style={{fontSize:13,fontWeight:800,color:C.text}}>🛡 My Certifications</div>
-      <button onClick={save} disabled={saving} style={{padding:"7px 14px",background:"#14532d",border:`1px solid ${C.green}`,borderRadius:8,color:C.green,cursor:"pointer",fontSize:12,fontWeight:700,opacity:saving?0.7:1}}>
-        {saving?"Saving…":saved?"✓ Saved!":"💾 Save Changes"}
+      <button onClick={save} disabled={saving}
+        style={{padding:"7px 14px",background:"#14532d",border:`1px solid ${C.green}`,borderRadius:8,color:C.green,cursor:"pointer",fontSize:12,fontWeight:700,opacity:saving?0.7:1}}>
+        {saving?"Saving…":saved?"✓ Saved!":"💾 Save"}
       </button>
     </div>
 
-    {/* Status summary */}
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginBottom:14}}>
-      {[["Valid",counts.valid,C.green],["Expiring",counts.expiring,C.yellow],["Expired",counts.expired,C.red],["Missing",counts.missing,C.muted]].map(([l,n,c])=>(
-        <div key={l} style={{background:C.bg,borderRadius:8,padding:"7px 4px",textAlign:"center",border:`1px solid ${c}22`}}>
-          <div style={{fontSize:16,fontWeight:900,color:c}}>{n}</div>
+    {/* Summary KPIs — only if there are held certs */}
+    {heldCerts.length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7,marginBottom:14}}>
+      {[["Valid",counts.valid,C.green],["Expiring",counts.expiring,C.yellow],["Expired",counts.expired,C.red]].map(([l,n,col])=>(
+        <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 4px",textAlign:"center",border:`1px solid ${col}22`}}>
+          <div style={{fontSize:18,fontWeight:900,color:col}}>{n}</div>
           <div style={{fontSize:9,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{l}</div>
         </div>
       ))}
-    </div>
+    </div>}
 
-    <div style={{fontSize:12,color:C.muted,marginBottom:14}}>Tick each certification you hold. Add expiry dates and upload photos of your cards.</div>
-    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      {sortedCerts.map(cert=>{
-        const held=certs[cert.key]?.held||false, expiry=certs[cert.key]?.expiry||"", photoUrl=certs[cert.key]?.photoUrl||"", isUp=uploading[cert.key];
+    {/* Empty state */}
+    {heldCerts.length===0&&<div style={{textAlign:"center",padding:"24px 0 16px"}}>
+      <div style={{fontSize:36,marginBottom:10}}>🛡</div>
+      <div style={{color:C.muted,fontSize:13,marginBottom:4}}>No certifications added yet.</div>
+      <div style={{color:C.muted,fontSize:12}}>Tap the button below to add your qualifications.</div>
+    </div>}
+
+    {/* Held certs list */}
+    <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+      {heldCerts.map(cert=>{
+        const expiry=certs[cert.key]?.expiry||"", photoUrl=certs[cert.key]?.photoUrl||"", isUp=uploading[cert.key];
         const s=getStatus(cert);
-        return <div key={cert.key} style={{background:C.bg,borderRadius:10,border:`1px solid ${held?CERT_C[s]+"44":C.border}`,overflow:"hidden"}}>
-          <div onClick={()=>toggle(cert.key)} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px",cursor:"pointer"}}>
-            <div style={{width:22,height:22,borderRadius:6,background:held?C.accent:C.card,border:`2px solid ${held?C.accent:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-              {held&&<span style={{color:"#fff",fontSize:13,fontWeight:900}}>✓</span>}
+        return <div key={cert.key} style={{background:C.bg,borderRadius:10,border:`1px solid ${(CERT_C[s]||C.border)+"44"}`,overflow:"hidden"}}>
+          {/* Cert header */}
+          <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 13px"}}>
+            <div style={{width:22,height:22,borderRadius:6,background:C.accent,border:`2px solid ${C.accent}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              <span style={{color:"#fff",fontSize:13,fontWeight:900}}>✓</span>
             </div>
             <div style={{flex:1}}>
-              <div style={{fontSize:13,fontWeight:held?700:400,color:held?C.text:C.sub}}>{cert.label}</div>
-              {cert.hasExpiry&&<div style={{fontSize:10,color:C.muted}}>Has expiry date</div>}
+              <div style={{fontSize:13,fontWeight:700,color:C.text}}>{cert.label}</div>
+              {cert.hasExpiry&&!expiry&&<div style={{fontSize:10,color:C.yellow,marginTop:1}}>⚠ No expiry date set</div>}
             </div>
-            {held&&<Badge label={s==="valid"?"✓ Valid":s==="expiring"?"⚠ Expiring":s==="expired"?"✗ Expired":"Held"} color={CERT_C[s]}/>}
+            <Badge label={s==="valid"?"✓ Valid":s==="expiring"?"⚠ Expiring":"✗ Expired"} color={CERT_C[s]||C.muted}/>
+            <button onClick={()=>removeCert(cert.key)} title="Remove this cert"
+              style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:"0 0 0 4px",lineHeight:1}}>×</button>
           </div>
-          {held&&<div style={{padding:"0 13px 13px",borderTop:`1px solid ${C.border}`}}>
+          {/* Expiry + photo */}
+          <div style={{padding:"0 13px 13px",borderTop:`1px solid ${C.border}`}}>
             {cert.hasExpiry&&<div style={{marginTop:10}}>
               <Lbl>Expiry Date</Lbl>
               <input type="date" value={expiry} onChange={e=>setExpiry(cert.key,e.target.value)}
                 style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 10px",color:C.text,fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"}}/>
               {expiry&&s==="expiring"&&<div style={{fontSize:11,color:C.yellow,marginTop:4}}>⚠ Expiring soon — please renew</div>}
-              {expiry&&s==="expired"&&<div style={{fontSize:11,color:C.red,marginTop:4}}>✗ This certification has expired</div>}
+              {expiry&&s==="expired" &&<div style={{fontSize:11,color:C.red,  marginTop:4}}>✗ This certification has expired</div>}
             </div>}
             <div style={{marginTop:10}}>
               <Lbl>Photo of Certificate</Lbl>
@@ -1508,10 +1602,18 @@ function EditCertsView({ worker, onSave }) {
               </label>
               {photoUrl&&<img src={photoUrl} alt={cert.label} style={{marginTop:8,width:"100%",maxHeight:100,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,cursor:"pointer"}} onClick={()=>window.open(photoUrl,"_blank")}/>}
             </div>
-          </div>}
+          </div>
         </div>;
       })}
     </div>
+
+    {/* Add Certification button */}
+    <button onClick={()=>setShowAddPanel(true)}
+      style={{width:"100%",padding:"13px",background:"#0d1a2e",border:`2px dashed ${C.accent}44`,borderRadius:10,color:C.accent,fontSize:14,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+      <span style={{fontSize:18,fontWeight:400}}>+</span>
+      Add Certification
+      {notHeldCerts.length>0&&<span style={{fontSize:11,color:C.muted,fontWeight:400}}>({notHeldCerts.length} available)</span>}
+    </button>
   </div>;
 }
 
