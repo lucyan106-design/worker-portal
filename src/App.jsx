@@ -835,6 +835,23 @@ function AnnouncementsPanel({ announcements, worker, onDismiss }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // SIGN IN / OUT VIEW (GPS, override, announcements)
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTENDANCE TAB — wraps Sign in/out + Leave requests as sub-tabs
+// ─────────────────────────────────────────────────────────────────────────────
+function AttendanceTab({ worker, allSites, weekLabel, announcements, onUpdateWorker }) {
+  const [sub, setSub] = useState("signin");
+  const pendingLeave = (worker.leaveRequests||[]).filter(r=>r.status==="pending").length;
+  return <div>
+    <div style={{display:"flex",background:"#111827",borderBottom:`1px solid ${C.border}`,padding:"6px 14px 0",gap:6}}>
+      {[["signin","📍 Sign In / Out"],["leave",`🏖 Leave${pendingLeave>0?` (${pendingLeave})`:""}`]].map(([v,l])=>(
+        <button key={v} onClick={()=>setSub(v)} style={{padding:"8px 14px",background:sub===v?"#1e3a5f":"transparent",border:sub===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:"7px 7px 0 0",color:sub===v?C.accent:C.muted,cursor:"pointer",fontSize:12,fontWeight:sub===v?700:400}}>{l}</button>
+      ))}
+    </div>
+    {sub==="signin"&&<SignInOutView worker={worker} allSites={allSites} weekLabel={weekLabel} announcements={announcements} onUpdateWorker={onUpdateWorker}/>}
+    {sub==="leave"&&<LeaveRequestView worker={worker} onSave={onUpdateWorker}/>}
+  </div>;
+}
+
 function SignInOutView({ worker, allSites, weekLabel:cfgWeekLabel, announcements, onUpdateWorker }) {
   const TODAY   = londonDayCode();
   // Always trust the live London week over whatever the admin config last wrote.
@@ -1187,101 +1204,219 @@ function SignInOutView({ worker, allSites, weekLabel:cfgWeekLabel, announcements
 // TIMESHEET VIEW — fixed print with correct breakdown
 // ─────────────────────────────────────────────────────────────────────────────
 function TimesheetView({ worker, weekLabel, siteHours, allSites, payslips }) {
-  const activeDays = useMemo(()=>{
-    const hw = WEEKEND_DAYS.some(d=>worker.days?.[d]&&!isOff(worker.days[d]));
-    return hw ? ALL_DAYS : BASE_DAYS;
-  },[worker]);
-  const taxPct    = Math.round((worker.taxRate||0)*100);
-  const currentPs = payslips.find(p=>p.weekLabel===weekLabel);
+  const [openWeek, setOpenWeek] = useState(null);
+  const [reportEntry, setReportEntry] = useState(null);
+  const [reportWorker, setReportWorker] = useState(worker);
+  useEffect(()=>{ setReportWorker(worker); },[worker]);
 
-  const confirmedLogs = useMemo(()=>
-    (worker.attendanceLogs||[]).filter(l=>l.weekLabel===weekLabel&&l.signIn&&l.signOut),
-    [worker,weekLabel]
-  );
+  const saveReport = async (entry, report) => {
+    try {
+      const logs = (reportWorker.attendanceLogs||[]).map(l=>l.id===entry.id?{...l,workReport:report}:l);
+      const updated = {...reportWorker, attendanceLogs:logs};
+      await sbPatch("workers",`id=eq.${reportWorker.id}`,{data:updated});
+      setReportWorker(updated);
+    } catch(e){ console.warn("Report save failed:",e.message); }
+    setReportEntry(null);
+  };
 
-  // Build proper day-by-day breakdown for print
-  const { confirmedPay, confirmedBd } = useMemo(()=>{
-    const rate = worker.agreedRate||0;
-    const otM  = worker.overtimeMultiplier||1.5;
-    let gross=0,stdH=0,otH=0;
-    const bd = {};
-    confirmedLogs.forEach(l=>{
-      const d    = l.day;
-      const std  = l.stdHours||(l.hoursWorked||0);
-      const ot   = l.otHours||0;
-      if (!bd[d]) bd[d] = {site:l.siteName,hours:0,ot:0,stdPay:0,otPay:0,gross:0};
-      bd[d].hours += std; bd[d].ot += ot;
-      bd[d].stdPay = bd[d].hours*rate;
-      bd[d].otPay  = bd[d].ot*rate*otM;
-      bd[d].gross  = bd[d].stdPay+bd[d].otPay;
-      stdH+=std; otH+=ot;
-      gross+=std*rate+ot*rate*otM;
+  // Group all the worker's completed/active sign-ins into weekly timesheets.
+  const weeks = useMemo(()=>{
+    const logs = (worker.attendanceLogs||[]).filter(l=>l.signIn);
+    const byWeek = {};
+    logs.forEach(l=>{
+      const wk = l.weekLabel || weekLabelForDate(l.signIn);
+      (byWeek[wk] = byWeek[wk] || []).push(l);
     });
-    const taxAmt = gross*(worker.taxRate||0);
-    return { confirmedPay:{gross,taxAmt,net:gross-taxAmt,stdH,otH}, confirmedBd:bd };
-  },[confirmedLogs,worker]);
+    const rate = worker.agreedRate||0, otM = worker.overtimeMultiplier||1.5;
+    return Object.entries(byWeek).map(([wk,wkLogs])=>{
+      const sorted = [...wkLogs].sort((a,b)=>new Date(a.signIn)-new Date(b.signIn));
+      let stdH=0, otH=0, gross=0;
+      sorted.forEach(l=>{
+        if(!l.signOut) return;
+        const std=l.stdHours||(l.hoursWorked||0), ot=l.otHours||0;
+        stdH+=std; otH+=ot; gross+=std*rate+ot*rate*otM;
+      });
+      const taxAmt=gross*(worker.taxRate||0);
+      const open=sorted.filter(l=>!l.signOut).length;
+      const ps=payslips.find(p=>p.weekLabel===wk);
+      return { weekLabel:wk, logs:sorted, stdH:Math.round(stdH*100)/100, otH:Math.round(otH*100)/100,
+        gross:Math.round(gross*100)/100, taxAmt:Math.round(taxAmt*100)/100, net:Math.round((gross-taxAmt)*100)/100,
+        entryCount:sorted.length, openEntries:open, payslip:ps,
+        weekStartMs:mondayOfWeek(new Date(sorted[0].signIn)).getTime() };
+    }).sort((a,b)=>b.weekStartMs-a.weekStartMs);
+  },[worker,payslips]);
+
+  const taxPct = Math.round((worker.taxRate||0)*100);
+
+  if(weeks.length===0) return <div style={{padding:24,textAlign:"center"}}>
+    <div style={{fontSize:32,marginBottom:10}}>⏱</div>
+    <div style={{color:C.muted,fontSize:13}}>No timesheets yet. Sign in on site and your weekly timesheets will appear here.</div>
+  </div>;
 
   return <div style={{padding:14}}>
-    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
-      <div>
-        <div style={{fontSize:13,fontWeight:800,color:C.text}}>Timesheet — WC {weekLabel}</div>
-        <div style={{fontSize:11,color:C.muted}}>GPS-confirmed entries only</div>
-      </div>
-      <button onClick={()=>printPayslip(worker,weekLabel,confirmedPay.gross,confirmedPay.net,confirmedPay.taxAmt,taxPct,confirmedBd,activeDays)}
-        style={{padding:"7px 13px",background:"#1a2535",border:`1px solid ${C.red}44`,borderRadius:8,color:C.red,cursor:"pointer",fontSize:12,fontWeight:700}}>📄 Print</button>
-    </div>
+    <div style={{fontSize:11,color:C.muted,marginBottom:12}}>Each week you sign in becomes a timesheet. Tap one to see every work entry.</div>
 
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:14}}>
-      <KPI label="Conf. Hrs" value={confirmedPay.stdH.toFixed(1)+"h"} color={C.green} sub="GPS confirmed"/>
-      <KPI label="OT Hrs"    value={confirmedPay.otH>0?confirmedPay.otH.toFixed(1)+"h":"—"} color={C.yellow}/>
-      <KPI label="Gross"     value={"£"+confirmedPay.gross.toFixed(0)} color={C.green}/>
-      <KPI label="Net"       value={"£"+confirmedPay.net.toFixed(0)} color={C.purple}/>
-    </div>
-
-    <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:16}}>
-      {activeDays.map(d=>{
-        const forecastSite = worker.days?.[d];
-        const off          = !forecastSite||isOff(forecastSite);
-        const dayLogs      = confirmedLogs.filter(l=>l.day===d);
-        const isConfirmed  = dayLogs.length>0;
-        const col          = siteColor(forecastSite,allSites);
-        const dayTotal     = dayLogs.reduce((a,l)=>a+(l.hoursWorked||hoursFromMs(new Date(l.signOut)-new Date(l.signIn))),0);
-
-        return <Card key={d} style={{borderLeft:`3px solid ${isConfirmed?C.green:off?"#1e2535":C.yellow+"88"}`,padding:"10px 13px",background:isConfirmed?"#0d221822":C.card}}>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{fontSize:12,fontWeight:800,color:isConfirmed?C.green:off?C.muted:C.yellow,minWidth:32}}>{d}</div>
-            {off&&!isConfirmed
-              ?<span style={{fontSize:12,color:C.muted,fontStyle:"italic",flex:1}}>Off / Not allocated</span>
-              :<>
-                <div style={{flex:1}}>
-                  <div style={{display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-                    {forecastSite&&<Badge label={forecastSite.trim()} color={col}/>}
-                    <span style={{fontSize:10,fontWeight:700,color:isConfirmed?C.green:C.yellow}}>{isConfirmed?"✅ Confirmed":"📋 Forecast — not yet signed in"}</span>
-                  </div>
-                  {isConfirmed&&dayLogs.map((l,i)=><div key={l.id} style={{fontSize:10,color:C.muted,marginTop:3}}>
-                    Entry #{l.entryNum||i+1}: {fmtTime(l.signIn)} → {fmtTime(l.signOut)}{l.otHours>0?` · OT: ${l.otHours.toFixed(1)}h`:""}
-                    {l.signOutOverride&&<span style={{color:C.yellow,marginLeft:4}}>⚠ override</span>}
-                  </div>)}
-                </div>
-                {isConfirmed&&<span style={{fontSize:13,fontWeight:800,color:C.green}}>{dayTotal.toFixed(1)}h</span>}
-              </>}
+    {weeks.map(w=>{
+      const isOpen=openWeek===w.weekLabel;
+      const isCurrent=w.weekLabel===weekLabel;
+      const psStatus=w.payslip?.status;
+      return <Card key={w.weekLabel} style={{marginBottom:8,border:`1px solid ${isCurrent?C.accent+"44":C.border}`,padding:0,overflow:"hidden"}}>
+        {/* Summary row — tap to open */}
+        <div onClick={()=>setOpenWeek(isOpen?null:w.weekLabel)} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",cursor:"pointer"}}>
+          <div style={{flex:1}}>
+            <div style={{display:"flex",alignItems:"center",gap:7}}>
+              <span style={{fontSize:13,fontWeight:800,color:C.text}}>WC {w.weekLabel}</span>
+              {isCurrent&&<Badge label="This week" color={C.accent}/>}
+              {w.openEntries>0&&<Badge label={`${w.openEntries} live`} color={C.yellow}/>}
+            </div>
+            <div style={{fontSize:10,color:C.muted,marginTop:3}}>
+              {w.entryCount} {w.entryCount===1?"entry":"entries"} · {w.stdH.toFixed(1)}h{w.otH>0?` +${w.otH.toFixed(1)} OT`:""}
+            </div>
           </div>
-        </Card>;
-      })}
-    </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:15,fontWeight:800,color:C.green}}>£{w.net.toFixed(2)}</div>
+            <div style={{fontSize:9,color:C.muted}}>net</div>
+          </div>
+          {w.payslip&&<Badge label={psStatus==="paid"?"✓ Paid":psStatus==="issued"?"Issued":"Pending"} color={psStatus==="paid"?C.green:psStatus==="issued"?C.purple:C.yellow}/>}
+          <span style={{color:C.muted,fontSize:14}}>{isOpen?"▲":"▼"}</span>
+        </div>
 
-    <Card style={{background:"linear-gradient(135deg,#0d2218,#1a3020)",border:`1px solid ${C.green}44`}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-        <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>Week Summary</div>
-        {currentPs&&<Badge label={currentPs.status==="paid"?"✓ PAID":"Pending"} color={currentPs.status==="paid"?C.green:C.yellow}/>}
-      </div>
-      {[["Gross Pay","£"+confirmedPay.gross.toFixed(2),C.green],[`Tax (${taxPct}%)`,"-£"+confirmedPay.taxAmt.toFixed(2),C.red],["Net Pay","£"+confirmedPay.net.toFixed(2),C.purple]].map(([l,v,c])=>
-        <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.muted}}>{l}</span><span style={{fontSize:13,fontWeight:700,color:c}}>{v}</span></div>
-      )}
-      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0 0"}}><span style={{fontSize:13,fontWeight:800,color:C.sub}}>NET TO ACCOUNT</span><span style={{fontSize:20,fontWeight:900,color:C.green}}>£{confirmedPay.net.toFixed(2)}</span></div>
-      {confirmedLogs.length===0&&<div style={{marginTop:8,fontSize:11,color:C.yellow,textAlign:"center"}}>No GPS confirmations yet this week — sign in on site to confirm your days.</div>}
-    </Card>
+        {/* Expanded detail */}
+        {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 14px",background:C.bg}}>
+          {/* KPIs */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginBottom:12}}>
+            <KPI label="Std Hrs" value={w.stdH.toFixed(1)+"h"} color={C.green}/>
+            <KPI label="OT Hrs"  value={w.otH>0?w.otH.toFixed(1)+"h":"—"} color={C.yellow}/>
+            <KPI label="Gross"   value={"£"+w.gross.toFixed(0)} color={C.green}/>
+            <KPI label="Net"     value={"£"+w.net.toFixed(0)} color={C.purple}/>
+          </div>
+
+          {/* Work entries list */}
+          <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",marginBottom:7}}>Work Entries</div>
+          <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:12}}>
+            {w.logs.map((l,i)=>{
+              const hrs=l.signOut?hoursFromMs(new Date(l.signOut)-new Date(l.signIn)):null;
+              const col=siteColor(l.siteName,allSites);
+              return <div key={l.id||i} style={{background:C.card,borderRadius:8,padding:"9px 11px",borderLeft:`3px solid ${col}`}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                  <span style={{fontSize:10,color:C.muted,minWidth:18}}>#{l.entryNum||i+1}</span>
+                  <span style={{fontSize:12,fontWeight:700,color:C.text,flex:1}}>{l.siteName||"—"}</span>
+                  <span style={{fontSize:12,fontWeight:800,color:l.signOut?C.green:C.yellow}}>{hrs!=null?hrs.toFixed(1)+"h":"● on site"}</span>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,fontSize:10,color:C.muted}}>
+                  <span>{new Date(l.signIn).toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"})}</span>
+                  <span style={{color:C.green}}>↓ {fmtTime(l.signIn)}</span>
+                  <span style={{color:l.signOut?C.red:C.yellow}}>↑ {l.signOut?fmtTime(l.signOut):"—"}</span>
+                  {l.otHours>0&&<span style={{color:C.yellow}}>+{l.otHours.toFixed(1)} OT</span>}
+                  {l.signOutOverride&&<span style={{color:C.yellow}}>⚠ override</span>}
+                </div>
+                {/* Scope of this work entry (set by site manager) + report */}
+                {l.scopeLabel&&<div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${C.border}`,fontSize:11,color:C.sub}}>
+                  <span style={{color:C.muted}}>Scope: </span><span style={{color:C.accent,fontWeight:600}}>{l.scopeLabel}</span>
+                </div>}
+                <div style={{marginTop:8,display:"flex",justifyContent:"flex-end"}}>
+                  <button onClick={()=>setReportEntry(l)} style={{padding:"5px 11px",fontSize:11,fontWeight:700,borderRadius:6,border:`1px solid ${l.workReport?C.accent:C.border}`,background:l.workReport?"#1e3a5f":C.card,color:l.workReport?C.accent:C.muted,cursor:"pointer"}}>
+                    {l.workReport?(l.workReport.type==="negative"?"⚠ Edit Report":"✓ Edit Report"):"+ Add Report"}
+                  </button>
+                </div>
+              </div>;
+            })}
+          </div>
+
+          {/* Pay breakdown */}
+          <Card style={{background:"linear-gradient(135deg,#0d2218,#1a3020)",border:`1px solid ${C.green}44`,padding:"11px 13px"}}>
+            {[["Gross","£"+w.gross.toFixed(2),C.green],[`Tax (${taxPct}%)`,"-£"+w.taxAmt.toFixed(2),C.red],["Net","£"+w.net.toFixed(2),C.purple]].map(([l,v,c])=>
+              <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:12,color:C.muted}}>{l}</span><span style={{fontSize:13,fontWeight:700,color:c}}>{v}</span></div>
+            )}
+            <button onClick={()=>printPayslip(worker,w.weekLabel,w.gross,w.net,w.taxAmt,taxPct,buildBd(w.logs,worker),ALL_DAYS)}
+              style={{width:"100%",marginTop:10,padding:"9px",background:"#1a2535",border:`1px solid ${C.red}44`,borderRadius:8,color:C.red,cursor:"pointer",fontSize:12,fontWeight:700}}>📄 Print Timesheet</button>
+          </Card>
+        </div>}
+      </Card>;
+    })}
+    {reportEntry&&<PortalReportModal entry={reportEntry} worker={reportWorker} onSave={saveReport} onClose={()=>setReportEntry(null)}/>}
   </div>;
+}
+
+// Compact daily work report modal for the worker portal.
+function PortalReportModal({ entry, worker, onSave, onClose }) {
+  const existing = entry.workReport||null;
+  const [type, setType] = useState(existing?.type||"positive");
+  const [activities, setActivities] = useState(existing?.activities||[{id:1,text:"",duration:""}]);
+  const [actCount, setActCount] = useState(existing?.activities?.length||1);
+  const isNeg = type==="negative";
+  const dateStr = entry.signIn?new Date(entry.signIn).toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"}):"—";
+  const tIn = entry.signIn?fmtTime(entry.signIn):"—";
+  const tOut = entry.signOut?fmtTime(entry.signOut):"on site";
+
+  const addAct = ()=>{const id=actCount+1;setActCount(id);setActivities(a=>[...a,{id,text:"",duration:""}]);};
+  const removeAct = (id)=>{if(activities.length===1)return;setActivities(a=>a.filter(x=>x.id!==id));};
+  const updateAct = (id,k,v)=>setActivities(a=>a.map(x=>x.id===id?{...x,[k]:v}:x));
+
+  const save = ()=>{
+    const report = {type,activities:activities.filter(a=>a.text.trim()),createdAt:new Date().toISOString(),by:"worker"};
+    if(isNeg && !window.confirm("This is a negative report. Your site manager and the office will be notified. Save?")) return;
+    onSave(entry, report);
+  };
+
+  const INP = {width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 11px",color:C.text,fontSize:13,outline:"none",resize:"vertical",fontFamily:"inherit",boxSizing:"border-box"};
+
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:400}}>
+    <div style={{background:C.card,borderRadius:"16px 16px 0 0",width:"100%",maxWidth:480,maxHeight:"88vh",overflowY:"auto",border:`1px solid ${C.border}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"15px 16px",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,background:C.card,zIndex:1}}>
+        <div>
+          <div style={{fontSize:14,fontWeight:800,color:C.text}}>Daily Work Report</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:2}}>{dateStr} · {entry.siteName} · {tIn}–{tOut}</div>
+        </div>
+        <button onClick={onClose} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:22,lineHeight:1}}>×</button>
+      </div>
+      <div style={{padding:16}}>
+        {entry.scopeLabel&&<div style={{background:C.bg,borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:12,color:C.sub}}>
+          <span style={{color:C.muted}}>Scope for this entry: </span><span style={{color:C.accent,fontWeight:600}}>{entry.scopeLabel}</span>
+        </div>}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
+          {[["positive","✓","Positive","Work as planned",C.green],["negative","⚠","Negative","Issues / delays",C.red]].map(([t,ic,lbl,sub,col])=>(
+            <button key={t} onClick={()=>setType(t)} style={{padding:"11px 13px",borderRadius:10,border:`2px solid ${type===t?col:C.border}`,background:type===t?col+"18":C.bg,cursor:"pointer",textAlign:"left"}}>
+              <div style={{fontSize:18,marginBottom:3}}>{ic}</div>
+              <div style={{fontSize:13,fontWeight:700,color:type===t?col:C.sub}}>{lbl}</div>
+              <div style={{fontSize:10,color:type===t?col:C.muted,marginTop:1}}>{sub}</div>
+            </button>
+          ))}
+        </div>
+        {isNeg&&<div style={{background:"#2d1515",border:`1px solid ${C.red}44`,borderRadius:9,padding:"10px 13px",marginBottom:14,fontSize:12,color:C.red}}>📣 A negative report notifies your site manager and the office.</div>}
+        {activities.map((a,i)=>(
+          <div key={a.id} style={{background:C.bg,borderRadius:10,border:`1px solid ${C.border}`,padding:13,marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Activity {i+1}</div>
+              {activities.length>1&&<button onClick={()=>removeAct(a.id)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13}}>✕</button>}
+            </div>
+            <textarea value={a.text} onChange={e=>updateAct(a.id,"text",e.target.value)} placeholder="What did you work on?" rows={2} style={{...INP,marginBottom:8}}/>
+            <input value={a.duration} onChange={e=>updateAct(a.id,"duration",e.target.value)} placeholder="Time spent (e.g. 3h)" style={INP}/>
+          </div>
+        ))}
+        <button onClick={addAct} style={{width:"100%",padding:"9px",background:C.bg,border:`1px dashed ${C.border}`,borderRadius:8,color:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,marginBottom:14}}>+ Add another activity</button>
+        <div style={{display:"flex",gap:9}}>
+          <button onClick={onClose} style={{flex:1,padding:"11px",background:C.bg,border:`1px solid ${C.border}`,borderRadius:9,color:C.muted,cursor:"pointer",fontSize:13,fontWeight:700}}>Cancel</button>
+          <button onClick={save} style={{flex:2,padding:"11px",background:isNeg?"#7f1d1d":"#14532d",border:`1px solid ${isNeg?C.red:C.green}`,borderRadius:9,color:"#fff",cursor:"pointer",fontSize:13,fontWeight:800}}>Save Report</button>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+// Build the day-by-day breakdown for the payslip printer from raw logs
+function buildBd(logs, worker){
+  const rate=worker.agreedRate||0, otM=worker.overtimeMultiplier||1.5;
+  const bd={};
+  logs.forEach(l=>{
+    if(!l.signOut) return;
+    const d=l.day, std=l.stdHours||(l.hoursWorked||0), ot=l.otHours||0;
+    if(!bd[d]) bd[d]={site:l.siteName,hours:0,ot:0,stdPay:0,otPay:0,gross:0};
+    bd[d].hours+=std; bd[d].ot+=ot;
+    bd[d].stdPay=bd[d].hours*rate; bd[d].otPay=bd[d].ot*rate*otM;
+    bd[d].gross=bd[d].stdPay+bd[d].otPay;
+  });
+  return bd;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1410,19 +1545,7 @@ function LeaveRequestView({ worker, onSave }) {
 // RECORDS VIEW — payslip history + leave (sub-tabs)
 // ─────────────────────────────────────────────────────────────────────────────
 function RecordsView({ worker, payslips, onSave }) {
-  const [sub, setSub] = useState("payslips");
-  const hasPaidNotif  = payslips.some(p=>p.status==="paid"&&!p.workerAcknowledged);
-  const pendingLeave  = (worker.leaveRequests||[]).filter(r=>r.status==="pending").length;
-
-  return <div>
-    <div style={{display:"flex",background:"#111827",borderBottom:`1px solid ${C.border}`,padding:"6px 14px 0",gap:6}}>
-      {[["payslips",`📋 Payslips${hasPaidNotif?" 🔴":""}`],["leave",`🏖 Leave${pendingLeave>0?` (${pendingLeave})`:""}`]].map(([v,l])=>(
-        <button key={v} onClick={()=>setSub(v)} style={{padding:"8px 14px",background:sub===v?"#1e3a5f":"transparent",border:sub===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:"7px 7px 0 0",color:sub===v?C.accent:C.muted,cursor:"pointer",fontSize:12,fontWeight:sub===v?700:400}}>{l}</button>
-      ))}
-    </div>
-    {sub==="payslips"&&<PayslipHistory worker={worker} payslips={payslips}/>}
-    {sub==="leave"&&<LeaveRequestView worker={worker} onSave={onSave}/>}
-  </div>;
+  return <PayslipHistory worker={worker} payslips={payslips}/>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1661,14 +1784,16 @@ function PersonalView({ worker, onSave, documents }) {
 
   const PERSONAL_FIELDS = [["Full Name","name"],["Phone Number","phone"],["Home Address","address"],["NI Number","niNumber"],["Emergency Contact Name","emergencyName"],["Emergency Contact Phone","emergencyPhone"]];
   const BANK_FIELDS     = [["Bank Name","bankName"],["Sort Code","sortCode"],["Account Number","accountNo"]];
+  const certAlerts = CERTS.filter(c=>{const s=certStatus(c,worker);return s==="expired"||s==="expiring";}).length;
 
   return <div>
-    <div style={{display:"flex",background:"#111827",borderBottom:`1px solid ${C.border}`,padding:"6px 14px 0",gap:6}}>
-      {[["details","👤 Details"],["docs","📄 Documents"]].map(([v,l])=>(
-        <button key={v} onClick={()=>setSub(v)} style={{padding:"8px 14px",background:sub===v?"#1e3a5f":"transparent",border:sub===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:"7px 7px 0 0",color:sub===v?C.accent:C.muted,cursor:"pointer",fontSize:12,fontWeight:sub===v?700:400}}>{l}</button>
+    <div style={{display:"flex",background:"#111827",borderBottom:`1px solid ${C.border}`,padding:"6px 14px 0",gap:6,overflowX:"auto"}}>
+      {[["details","👤 Details"],["certs",`🛡 Certs${certAlerts>0?" ⚠️":""}`],["docs","📄 Documents"]].map(([v,l])=>(
+        <button key={v} onClick={()=>setSub(v)} style={{padding:"8px 14px",background:sub===v?"#1e3a5f":"transparent",border:sub===v?`1px solid ${C.accent}`:"1px solid transparent",borderRadius:"7px 7px 0 0",color:sub===v?C.accent:C.muted,cursor:"pointer",fontSize:12,fontWeight:sub===v?700:400,whiteSpace:"nowrap"}}>{l}</button>
       ))}
     </div>
 
+    {sub==="certs"&&<EditCertsView worker={worker} onSave={onSave}/>}
     {sub==="docs"&&<DocumentsView documents={documents}/>}
 
     {sub==="details"&&<div style={{padding:14}}>
@@ -1745,11 +1870,10 @@ function Dashboard({ worker:iw, weekLabel:cfgWeekLabel, siteHours, allSites, pay
   const unseenAnnounce= (announcements||[]).filter(a=>a.active&&!(worker.dismissedAnnouncements||[]).includes(a.id)).length;
 
   const TABS = [
-    { id:"attendance", label:`📍 Attend.${unreadNotifs>0||unseenAnnounce>0?" 🔔":""}` },
-    { id:"timesheet",  label:"📅 Sheet" },
+    { id:"attendance", label:`📍 Attend.${unreadNotifs>0||unseenAnnounce>0||pendingLeave>0?" 🔔":""}` },
+    { id:"timesheet",  label:"📅 Timesheet" },
     { id:"records",    label:`📋 Records${hasPaidNotif?" 🔴":""}` },
-    { id:"certs",      label:`🛡 Certs${certAlerts.length>0?" ⚠️":""}` },
-    { id:"profile",    label:"👤 Profile" },
+    { id:"profile",    label:`👤 Profile${certAlerts.length>0?" ⚠️":""}` },
   ];
 
   return (
@@ -1789,10 +1913,9 @@ function Dashboard({ worker:iw, weekLabel:cfgWeekLabel, siteHours, allSites, pay
       </div>
 
       {/* Tab content */}
-      {tab==="attendance"&&<SignInOutView worker={worker} allSites={allSites} weekLabel={weekLabel} announcements={announcements} onUpdateWorker={setWorker}/>}
+      {tab==="attendance"&&<AttendanceTab worker={worker} allSites={allSites} weekLabel={weekLabel} announcements={announcements} onUpdateWorker={setWorker}/>}
       {tab==="timesheet" &&<TimesheetView worker={worker} weekLabel={weekLabel} siteHours={siteHours} allSites={allSites} payslips={payslips}/>}
       {tab==="records"   &&<RecordsView  worker={worker} payslips={payslips} onSave={setWorker}/>}
-      {tab==="certs"     &&<EditCertsView worker={worker} onSave={setWorker}/>}
       {tab==="profile"   &&<PersonalView  worker={worker} onSave={setWorker} documents={documents}/>}
 
       <div style={{padding:"10px 16px",textAlign:"center",fontSize:11,color:C.muted,borderTop:`1px solid ${C.border}`,marginTop:8}}>Bright Metalwork Ltd · Worker Portal v2</div>
