@@ -1311,6 +1311,7 @@ function TimesheetView({ worker, weekLabel, siteHours, allSites, payslips }) {
                   {l.signOutOverride&&<span style={{color:C.yellow}}>⚠ override</span>}
                 </div>
                 {/* Scope of this work entry (set by site manager) + report */}
+<<<<<<< Updated upstream
                 {(()=>{
                   const entrySite=(allSites||[]).find(s=>s.name===l.siteName||(l.siteName||"").toUpperCase().includes((s.name||"").toUpperCase()));
                   const siteScopes=(entrySite?.scopes||[]).filter(sc=>sc&&(sc.description||sc.desc));
@@ -1330,6 +1331,11 @@ function TimesheetView({ worker, weekLabel, siteHours, allSites, payslips }) {
                     </details>}
                   </>;
                 })()}
+=======
+                {l.scopeLabel&&<div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${C.border}`,fontSize:11,color:C.sub}}>
+                  <span style={{color:C.muted}}>Scope: </span><span style={{color:C.accent,fontWeight:600}}>{l.scopeLabel}</span>
+                </div>}
+>>>>>>> Stashed changes
                 <div style={{marginTop:8,display:"flex",justifyContent:"flex-end"}}>
                   <button onClick={()=>setReportEntry(l)} style={{padding:"5px 11px",fontSize:11,fontWeight:700,borderRadius:6,border:`1px solid ${l.workReport?C.accent:C.border}`,background:l.workReport?"#1e3a5f":C.card,color:l.workReport?C.accent:C.muted,cursor:"pointer"}}>
                     {l.workReport?(l.workReport.type==="negative"?"⚠ Edit Report":"✓ Edit Report"):"+ Add Report"}
@@ -1350,30 +1356,48 @@ function TimesheetView({ worker, weekLabel, siteHours, allSites, payslips }) {
         </div>}
       </Card>;
     })}
+<<<<<<< Updated upstream
     {reportEntry&&<PortalReportModal entry={reportEntry} worker={reportWorker} allSites={allSites} onSave={saveReport} onClose={()=>setReportEntry(null)}/>}
+=======
+    {reportEntry&&<PortalReportModal entry={reportEntry} worker={reportWorker} onSave={saveReport} onClose={()=>setReportEntry(null)}/>}
+>>>>>>> Stashed changes
   </div>;
 }
 
 // Compact daily work report modal for the worker portal.
+<<<<<<< Updated upstream
 function PortalReportModal({ entry, worker, allSites, onSave, onClose }) {
+=======
+function PortalReportModal({ entry, worker, onSave, onClose }) {
+>>>>>>> Stashed changes
   const existing = entry.workReport||null;
   const [type, setType] = useState(existing?.type||"positive");
   const [activities, setActivities] = useState(existing?.activities||[{id:1,text:"",duration:""}]);
   const [actCount, setActCount] = useState(existing?.activities?.length||1);
+<<<<<<< Updated upstream
   const [scope, setScope] = useState(existing?.scope||entry.scopeLabel||"");
+=======
+>>>>>>> Stashed changes
   const isNeg = type==="negative";
   const dateStr = entry.signIn?new Date(entry.signIn).toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"}):"—";
   const tIn = entry.signIn?fmtTime(entry.signIn):"—";
   const tOut = entry.signOut?fmtTime(entry.signOut):"on site";
+<<<<<<< Updated upstream
   const entrySite=(allSites||[]).find(s=>s.name===entry.siteName||(entry.siteName||"").toUpperCase().includes((s.name||"").toUpperCase()));
   const siteScopes=(entrySite?.scopes||[]).filter(sc=>sc&&(sc.description||sc.desc)).map(sc=>sc.description||sc.desc);
+=======
+>>>>>>> Stashed changes
 
   const addAct = ()=>{const id=actCount+1;setActCount(id);setActivities(a=>[...a,{id,text:"",duration:""}]);};
   const removeAct = (id)=>{if(activities.length===1)return;setActivities(a=>a.filter(x=>x.id!==id));};
   const updateAct = (id,k,v)=>setActivities(a=>a.map(x=>x.id===id?{...x,[k]:v}:x));
 
   const save = ()=>{
+<<<<<<< Updated upstream
     const report = {type,scope:scope||null,activities:activities.filter(a=>a.text.trim()),createdAt:new Date().toISOString(),by:"worker"};
+=======
+    const report = {type,activities:activities.filter(a=>a.text.trim()),createdAt:new Date().toISOString(),by:"worker"};
+>>>>>>> Stashed changes
     if(isNeg && !window.confirm("This is a negative report. Your site manager and the office will be notified. Save?")) return;
     onSave(entry, report);
   };
@@ -1390,6 +1414,7 @@ function PortalReportModal({ entry, worker, allSites, onSave, onClose }) {
         <button onClick={onClose} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:22,lineHeight:1}}>×</button>
       </div>
       <div style={{padding:16}}>
+<<<<<<< Updated upstream
         {/* Scope picker — which scope of works did you work on? */}
         <div style={{marginBottom:14}}>
           <div style={{fontSize:10,fontWeight:700,color:C.muted,textTransform:"uppercase",marginBottom:6}}>Scope of works</div>
@@ -1402,6 +1427,11 @@ function PortalReportModal({ entry, worker, allSites, onSave, onClose }) {
             :<input value={scope} onChange={e=>setScope(e.target.value)} placeholder="What scope did you work on?" style={INP}/>}
           {entry.scopeLabel&&<div style={{fontSize:10,color:C.muted,marginTop:5}}>Allocated by manager: <span style={{color:C.accent,fontWeight:600}}>{entry.scopeLabel}</span></div>}
         </div>
+=======
+        {entry.scopeLabel&&<div style={{background:C.bg,borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:12,color:C.sub}}>
+          <span style={{color:C.muted}}>Scope for this entry: </span><span style={{color:C.accent,fontWeight:600}}>{entry.scopeLabel}</span>
+        </div>}
+>>>>>>> Stashed changes
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
           {[["positive","✓","Positive","Work as planned",C.green],["negative","⚠","Negative","Issues / delays",C.red]].map(([t,ic,lbl,sub,col])=>(
             <button key={t} onClick={()=>setType(t)} style={{padding:"11px 13px",borderRadius:10,border:`2px solid ${type===t?col:C.border}`,background:type===t?col+"18":C.bg,cursor:"pointer",textAlign:"left"}}>
